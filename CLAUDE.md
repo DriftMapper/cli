@@ -1,0 +1,176 @@
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this
+repository.
+
+## What this repo is
+
+`driftmapper/cli` — the CLI that runs inside a customer's CI to register a build with
+Driftmapper (spec §5.2a). It is **write-only and single-action**: acquire a workload OIDC token,
+`POST /v1/builds`, write `build-info.html` from the response. No subcommands, no read
+operations — those are deliberately deferred (spec §5.2a).
+
+Distributed via npm (`npx @driftmapper/cli`) with per-platform binaries resolved through npm's
+`os`/`cpu` fields as `optionalDependencies`, plus raw binaries on GitHub Releases as a fallback
+for npm-blocked environments. `npm/wrapper` is a pure launcher — it locates and execs the Go
+binary, and reimplements none of its logic.
+
+**Public by design, not by accident** (DRFT-19): this binary executes inside customer CI, so
+auditability — anyone can read the source that runs in their pipeline, and reproduce the exact
+binary they installed — is the strongest form of the supply-chain posture. Everything in this
+file follows from that: no postinstall script, provenance attestation, reproducible builds, and
+a public dependency graph (see "The protocol dependency is public for a reason" below).
+
+Reference implementation this packaging was modeled on: `SpandrelSystems/cli` (private template
+repo, same org) — a generic Go-binary-via-npm scaffold. Every gotcha below traces back to a
+mistake that template already made and fixed once; this file exists so this repo doesn't make
+them again. (DRFT-19 itself was implemented once before, lost because the branch was never
+pushed, and rebuilt from scratch — see the git history and Linear for the full story. If you're
+reading this while rebuilding it a *third* time: check `git push` actually happened.)
+
+## Commands
+
+```bash
+go vet ./... && go test ./...
+go build -o bin/driftmapper ./cmd/driftmapper
+
+make check      # everything CI runs: go vet+test, npm unit tests, pack-and-install e2e
+make cross       # cross-compile all six release targets + reproducibility check
+
+cd npm/wrapper
+node --test          # unit tests for the resolution logic
+npm run test:e2e      # pack-and-install e2e — see the gotcha below on why this exists
+```
+
+## Architecture
+
+```
+cmd/driftmapper/main.go   entry point; single action (spec §5.2a); version + name
+                          stamped/declared here — name is the version-sentinel contract
+                          with the npm launcher, see gotcha below
+internal/
+  config/                 DRIFTMAPPER_API_URL / DRIFTMAPPER_OIDC_AUDIENCE / build-info
+                          path, all zero-config-by-default (spec §5.2a)
+  oidcclient/             acquires (never verifies) a workload OIDC token — v1 is GitHub
+                          Actions only (spec §4.3/§4.4); verification is exclusively
+                          server-side (spec §5.2: "must never ship in a binary running on
+                          customer infrastructure")
+  buildcontext/           normalizes GitHub Actions' env into the CLI-submitted half of a
+                          build registration (spec §2.2a) — repo identity/ref/workflow/run
+                          are deliberately NOT here; they're token-derived and the server
+                          rejects them if present in the body
+  buildinfo/               generates build-info.html (spec §2.3) as a pure function of one
+                          server response — no server call, no computed values
+  apiclient/               POST /v1/builds client for the {"data"}/{"error"} envelope
+                          (driftmapper/protocol's openapi.yaml)
+npm/
+  wrapper/                the package users install: bin/index.js (launcher shim),
+                          lib/resolve.js (resolution chain + PATH-fallback guard), test/
+  platforms/cli-<os>-<arch>/   one npm package per target, each just os/cpu/main/files —
+                          the binary is copied into bin/ at release time, never committed
+```
+
+## Gotcha — the version sentinel is a permanent compatibility contract
+
+`cmd/driftmapper/main.go`'s `name` constant (`"driftmapper"`) is what `driftmapper --version
+--json` emits, and it's the only thing `npm/wrapper/lib/resolve.js`'s PATH-fallback tier has to
+decide whether a binary found on `PATH` is actually this CLI. If this constant is ever renamed
+or the `--version --json` output shape changes incompatibly, a newer npm wrapper stops
+recognizing an older binary it finds on `PATH`, and silently falls through to the "no binary
+available" error instead. Change it only in lockstep with `resolve.js`'s `NAME` constant, and
+treat a change here as a breaking release.
+
+## Gotcha — a missing optionalDependency fails silently, not loudly
+
+npm does not fail an install when an `optionalDependency` 404s, or is omitted via
+`--omit=optional`, or hits the npm optional-dep lockfile bug class (npm/cli#4828, the
+esbuild/rollup one). It warns and continues. That means a user who ends up without the matching
+`@driftmapper/cli-<plat>-<arch>` package installed sees nothing wrong at install time — the
+wrapper just quietly has no binary, and `resolve.js` falls through to the `PATH` tier. This is
+why that tier exists at all (rather than a bare "not installed" error) and why it's the only
+tier that gets verified: see the next gotcha. It's also why `release.yml`'s `publish-npm` job is
+written to publish idempotently and wait for the platform packages to actually resolve before
+publishing the wrapper — see the gotcha after that.
+
+## Gotcha — the PATH fallback must verify identity, or it becomes a supply-chain hole
+
+Given the above, `resolve.js` cannot simply exec whatever it finds named `driftmapper` on
+`PATH` — that would mean any unrelated same-named binary silently runs in place of this one
+whenever the real platform package failed to install. The fix: `identifiesAsDriftmapper()` runs
+`<candidate> --version --json` and requires the output to parse with `name === "driftmapper"`
+before ever executing it for real. A rejected candidate is *named* in the final error
+(`"Ignored ... on PATH: it did not identify as this CLI"`), not silently skipped, because "but
+`driftmapper` IS on my PATH" is exactly the confusion that would otherwise cause. Only the
+`PATH` tier is checked this way — the `DRIFTMAPPER_BINARY_PATH` override and the bundled
+platform package are both trusted by construction (an explicit operator choice, and our own
+published artifact, respectively).
+
+Also load-bearing in `resolve.js`'s `fromPath()`: it never spawns a bare command name and never
+delegates to the OS/shell to find one. On Windows, `CreateProcess` searches the current working
+directory *before* `PATH`, so a same-named binary dropped in `cwd` would silently win over the
+real one on `PATH`. `fromPath()` scans `PATH` itself, excludes `cwd`, and only ever passes an
+absolute path to `execFileSync`.
+
+## Gotcha — platform packages must declare neither `bin` nor `exports`
+
+Two things that look like reasonable additions to `npm/platforms/*/package.json` and are not:
+
+- **No `bin` field.** Six platform packages declaring the same bin name (`driftmapper`) would
+  race to symlink `node_modules/.bin/driftmapper`, colliding with the wrapper's own `bin` entry.
+  Only the wrapper declares `bin`.
+- **No `exports` field.** `resolve.js`'s bundled-package tier calls
+  `require.resolve('<pkg>/package.json')` — an explicit subpath. Adding `exports` (even one that
+  looks like it should permit this) blocks any subpath not explicitly listed and makes that call
+  throw `ERR_PACKAGE_PATH_NOT_EXPORTED`, silently degrading every user of that platform to the
+  `PATH` fallback.
+
+## Gotcha — the exec bit is not preserved automatically
+
+`gh release download` and GitHub's artifact upload/download both drop the executable bit. Since
+platform packages declare no `bin` field (see above), npm does not `chmod +x` anything at
+install time either — the mode baked into the published tarball is all an end user ever gets.
+`release.yml`'s `publish-npm` job `chmod +x`s the binary explicitly after download and asserts
+`755` survived `npm pack` before publishing (`tar -tvf ... | grep -q -- '-rwx'`);
+`npm/wrapper/test/e2e.sh` runs the same assertion locally, before anything is ever pushed to a
+registry.
+
+## Gotcha — publish platform packages first, idempotently, then wait, then the wrapper
+
+The wrapper pins all six platform deps to an **exact** version, not a caret range — all seven
+packages release from one git tag in lockstep, so the version *is* the contract. A caret would
+let wrapper `v1.2.3` execute binary `v1.9.0` with a different (possibly incompatible) command
+surface, and one bad platform-package patch would retroactively poison every previously
+published wrapper version with no way to roll back.
+
+Given that, and given the "missing optionalDependency fails silently" gotcha above, `release.yml`
+publishes in a specific order: all six platform packages first — each checked against `npm view`
+first, so re-running the same tag after a partial failure doesn't error out on packages already
+published — then polls `npm view` until all six are actually visible (registry propagation is
+not instant), and only then stamps and publishes the wrapper. Publishing the wrapper into the
+gap before the platform packages are visible would produce a wrapper that installs clean with no
+binary for anyone who happens to install in that window.
+
+## Gotcha — `NPM_PUBLISH` gates the whole publish job
+
+A trusted publisher can't be configured on npmjs.com for a package that doesn't exist yet, so
+without a gate, the very first tag push would red-X on `publish-npm`. The job is
+`if: vars.NPM_PUBLISH == 'true'` — set that repo/environment variable to `true` only once all
+seven `@driftmapper/cli*` packages have trusted publishers configured for this repo+workflow on
+npmjs.com.
+
+## The `protocol` dependency is public for a reason
+
+`go.mod` requires `github.com/driftmapper/protocol` — the wire contract, N-2 semver'd, shared
+with the server. It was made public specifically for DRFT-19: a public `cli` that depends on a
+private module would be un-auditable and un-buildable by anyone outside the org, which defeats
+this whole repo's reason for existing. Do not add a dependency on a private module here without
+solving this same problem for it first.
+
+## No postinstall script, anywhere
+
+This is a hard requirement, not a style preference, for two independent reasons: it's a security
+review red flag for enterprise buyers evaluating whether to run this in their CI, and it's the
+live attack vector for Shai-Hulud-style npm supply-chain worms. Consequence, and the reason it's
+safe to promise: `ignore-scripts=true` environments work completely unmodified, since nothing
+ever needs to execute to fetch a binary — the platform binary arrives as an ordinary
+`optionalDependency` tarball, same as any other npm package.

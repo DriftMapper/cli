@@ -1,0 +1,27 @@
+{
+  "name": "@driftmapper/cli-darwin-arm64",
+  "version": "0.0.0",
+  "description": "Bundled driftmapper binary for macOS ARM64 (Apple Silicon)",
+  "os": [
+    "darwin"
+  ],
+  "cpu": [
+    "arm64"
+  ],
+  "main": "bin/driftmapper",
+  "files": [
+    "README.md",
+    "LICENSE",
+    "bin/driftmapper"
+  ],
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/DriftMapper/cli.git",
+    "directory": "npm/platforms/cli-darwin-arm64"
+  },
+  "license": "Apache-2.0"
+}
