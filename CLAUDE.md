@@ -6,9 +6,13 @@ repository.
 ## What this repo is
 
 `driftmapper/cli` — the CLI that runs inside a customer's CI to register a build with
-Driftmapper (spec §5.2a). It is **write-only and single-action**: acquire a workload OIDC token,
-`POST /v1/builds`, write `build-info.html` from the response. No subcommands, no read
-operations — those are deliberately deferred (spec §5.2a).
+Driftmapper (spec §5.2a). Its default action (no subcommand) is **write-only and
+single-action**: acquire a workload OIDC token, `POST /v1/builds`, write `build-info.html`
+from the response.
+
+`compare` (spec DRFT-26) is the one read subcommand, added deliberately narrow: it fetches
+`build-info.html` from two already-deployed targets and diffs on `build_instance_id` only, no
+API call. See "Gotcha — `compare` is thin on purpose" below for why it can't yet do more.
 
 Distributed via npm (`npx @driftmapper/cli`) with per-platform binaries resolved through npm's
 `os`/`cpu` fields as `optionalDependencies`, plus raw binaries on GitHub Releases as a fallback
@@ -33,6 +37,7 @@ reading this while rebuilding it a *third* time: check `git push` actually happe
 ```bash
 go vet ./... && go test ./...
 go build -o bin/driftmapper ./cmd/driftmapper
+./bin/driftmapper compare <build-info-url-a> <build-info-url-b>   # unauth, no server needed to try locally against two files served over HTTP
 
 make check      # everything CI runs: go vet+test, npm unit tests, pack-and-install e2e
 make cross       # cross-compile all six release targets + reproducibility check
@@ -45,7 +50,8 @@ npm run test:e2e      # pack-and-install e2e — see the gotcha below on why thi
 ## Architecture
 
 ```
-cmd/driftmapper/main.go   entry point; single action (spec §5.2a); version + name
+cmd/driftmapper/main.go   entry point; dispatches to `compare` before the default action's
+                          own flag.Parse() runs, so the two never collide; version + name
                           stamped/declared here — name is the version-sentinel contract
                           with the npm launcher, see gotcha below
 internal/
@@ -60,9 +66,13 @@ internal/
                           are deliberately NOT here; they're token-derived and the server
                           rejects them if present in the body
   buildinfo/               generates build-info.html (spec §2.3) as a pure function of one
-                          server response — no server call, no computed values
+                          server response — no server call, no computed values. Parse is
+                          the read-side counterpart, used only by compare/ below.
   apiclient/               POST /v1/builds client for the {"data"}/{"error"} envelope
                           (driftmapper/protocol's openapi.yaml)
+  compare/                 `driftmapper compare`'s fetch-and-diff logic (spec DRFT-26) —
+                          two build-info.html GETs and a build_instance_id equality check,
+                          no apiclient involved
 npm/
   wrapper/                the package users install: bin/index.js (launcher shim),
                           lib/resolve.js (resolution chain + PATH-fallback guard), test/
@@ -157,6 +167,30 @@ without a gate, the very first tag push would red-X on `publish-npm`. The job is
 `if: vars.NPM_PUBLISH == 'true'` — set that repo/environment variable to `true` only once all
 seven `@driftmapper/cli*` packages have trusted publishers configured for this repo+workflow on
 npmjs.com.
+
+## Gotcha — `compare` is thin on purpose, and why
+
+DRFT-26's ticket text describes diffing `(repository_id, commit_sha, ref, workflow, run_id,
+run_attempt)` unauthenticated. That's not implementable as written: `protocol/openapi.yaml`
+puts every one of those fields on `Build`, the `userSession`-only authenticated tier —
+`BuildPublic` (the unauth tier) has only `build_instance_id`/`repository_name`/`built_at` —
+and there is no unauth JSON endpoint at all (`getBuild` requires a session; the spec's own
+words: "the public tier exists only as server-rendered HTML and OG tags"). Worse, even
+`repository_name`/`built_at` aren't machine-parseable anywhere unauth today — the resolution
+page's OG tags are human prose ("Registered {{date}}. Sign in for full build details."), not
+per-field data.
+
+So `compare` reads only `build-info.html`'s own `driftmapper:*` meta tags (schema-version,
+build-id, resolution-url — the same file `internal/buildinfo.Generate` writes) and diffs on
+`build_instance_id` alone: same ID means same build, different ID means drift, with no detail
+on *what* differs. `--open`'s SPA hand-off (DRFT-29) is the path to richer, authenticated
+diffs — it isn't implemented here, since the SPA it deep-links to doesn't exist yet.
+
+A richer unauthenticated diff would need one of: new structured `driftmapper:*` meta tags on
+the resolution page (additive, no API/schema change — the natural next step, flagged as a
+follow-up rather than done here to keep this ticket's blast radius to the CLI repo alone), or
+a deliberate decision to promote a `BuildPublic`-shaped endpoint to unauthenticated. Don't
+silently expand what `compare` diffs without one of those landing first.
 
 ## The `protocol` dependency is public for a reason
 

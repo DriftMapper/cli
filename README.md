@@ -1,8 +1,9 @@
 # driftmapper/cli
 
 The Driftmapper CLI: registers a build from inside your CI so Driftmapper can track it.
-Write-only, single action — it acquires a workload OIDC token, calls `POST /v1/builds`, and
-writes `build-info.html`. It reads nothing back.
+The default action is write-only — it acquires a workload OIDC token, calls `POST
+/v1/builds`, and writes `build-info.html`. `compare` (below) is the one read command, and it
+stays unauthenticated rather than calling the API.
 
 ## Install and use
 
@@ -29,6 +30,21 @@ permissions:
 steps:
   - run: npx @driftmapper/cli
 ```
+
+### Comparing two deployed environments
+
+```bash
+driftmapper compare https://staging.example.com/build-info.html https://prod.example.com/build-info.html
+```
+
+Fetches `build-info.html` from each URL (no credentials, no API call) and reports whether
+they're the same build. `--json` prints a machine-readable result instead. Exit code follows
+`diff(1)`: `0` same build, `1` drift detected, `2` usage or fetch error — so it works directly
+as a CI gate.
+
+This is deliberately thin: it only tells you *whether* two targets match, not what changed.
+The only field disclosed unauthenticated today is the build ID itself — see
+[CLAUDE.md](CLAUDE.md) for why a richer diff isn't available yet.
 
 ### Environment variables
 

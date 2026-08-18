@@ -1,8 +1,13 @@
-// Command driftmapper is the MVP CLI's one job (spec §5.2a): acquire a
-// workload OIDC token, register a build, and write build-info.html from the
-// response. Write-only — it reads nothing back. No subcommands: read
-// commands are deliberately deferred (spec §5.2a), so there is exactly one
-// action to dispatch to.
+// Command driftmapper's default action (no subcommand) is the MVP CI job
+// (spec §5.2a): acquire a workload OIDC token, register a build, and write
+// build-info.html from the response. Write-only — it reads nothing back,
+// and every existing pinned CI invocation calls it exactly this way, so
+// that path must never change shape.
+//
+// `compare` (spec DRFT-26) is the one read subcommand: an unauthenticated,
+// user-invoked diff of two already-deployed targets, dispatched on before
+// the default action's own flag.Parse() ever runs — see runCompare and
+// internal/compare's doc comment for why it stays intentionally thin.
 package main
 
 import (
@@ -10,11 +15,14 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
+	"net/http"
 	"os"
 
 	"github.com/driftmapper/cli/internal/apiclient"
 	"github.com/driftmapper/cli/internal/buildcontext"
 	"github.com/driftmapper/cli/internal/buildinfo"
+	"github.com/driftmapper/cli/internal/compare"
 	"github.com/driftmapper/cli/internal/config"
 	"github.com/driftmapper/cli/internal/oidcclient"
 )
@@ -32,6 +40,13 @@ var version = "dev"
 const name = "driftmapper"
 
 func main() {
+	// Dispatched before flag.Parse() below, so "compare" can never collide
+	// with the default action's own flags (-output/-version/-json), which
+	// are all single-token and never equal to a bare subcommand name.
+	if len(os.Args) > 1 && os.Args[1] == "compare" {
+		os.Exit(runCompare(context.Background(), os.Args[2:], os.Stdout, os.Stderr))
+	}
+
 	output := flag.String("output", "", "path to write build-info.html (default: $DRIFTMAPPER_BUILD_INFO_FILE, or build-info.html)")
 	showVersion := flag.Bool("version", false, "print the version and exit")
 	asJSON := flag.Bool("json", false, "with -version, print {\"name\",\"version\"} as JSON instead of plain text")
@@ -85,4 +100,60 @@ func run(ctx context.Context, output string) error {
 	}
 	fmt.Printf("%s build %s -> %s\n", verb, build.BuildInstanceId, output)
 	return nil
+}
+
+// runCompare implements `driftmapper compare <url-a> <url-b> [-json]`.
+// Exit codes follow diff(1)'s convention, since CI is the primary caller
+// (spec DRFT-26's open question on this): 0 the two targets are the same
+// build, 1 they differ (drift), 2 usage or fetch/parse error.
+func runCompare(ctx context.Context, args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("compare", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	asJSON := fs.Bool("json", false, "print the result as JSON instead of human-readable text")
+	fs.Usage = func() {
+		fmt.Fprintln(stderr, "usage: driftmapper compare [-json] <build-info-url-a> <build-info-url-b>")
+		fs.PrintDefaults()
+	}
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if fs.NArg() != 2 {
+		fs.Usage()
+		return 2
+	}
+
+	result, err := compare.Run(ctx, http.DefaultClient, fs.Arg(0), fs.Arg(1))
+	if err != nil {
+		fmt.Fprintln(stderr, "driftmapper:", err)
+		return 2
+	}
+
+	if *asJSON {
+		json.NewEncoder(stdout).Encode(result)
+	} else {
+		printCompareResult(stdout, result)
+	}
+
+	if result.Match {
+		return 0
+	}
+	return 1
+}
+
+func printCompareResult(w io.Writer, r compare.Result) {
+	printTarget := func(label string, t compare.Target) {
+		fmt.Fprintf(w, "%s  %s\n", label, t.URL)
+		fmt.Fprintf(w, "   build  %s\n", t.Info.BuildInstanceID)
+		if t.Info.ResolutionURL != "" {
+			fmt.Fprintf(w, "   view   %s\n", t.Info.ResolutionURL)
+		}
+	}
+	printTarget("A", r.A)
+	printTarget("B", r.B)
+
+	if r.Match {
+		fmt.Fprintln(w, "\nsame build")
+		return
+	}
+	fmt.Fprintln(w, "\ndrift detected: different builds")
 }
