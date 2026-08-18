@@ -31,6 +31,16 @@ func BuildInfoFile() string {
 	return orDefault("DRIFTMAPPER_BUILD_INFO_FILE", defaultBuildInfoFile)
 }
 
+// DashboardURL is the SPA dashboard's base origin, used only to construct
+// `driftmapper compare -open`'s deep link (DRFT-36). Deliberately has no
+// default: unlike the API and OIDC audience, no dashboard deployment origin
+// has been decided anywhere in this org yet (driftmapper/static's apps/dashboard
+// has no production deploy target as of this writing). Returns "" when unset;
+// callers must treat that as "-open is unusable" rather than guessing a host.
+func DashboardURL() string {
+	return os.Getenv("DRIFTMAPPER_DASHBOARD_URL")
+}
+
 func orDefault(env, def string) string {
 	if v := os.Getenv(env); v != "" {
 		return v
