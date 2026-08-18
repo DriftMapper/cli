@@ -1,0 +1,27 @@
+{
+  "name": "@driftmapper/cli-linux-x64",
+  "version": "0.0.0",
+  "description": "Bundled driftmapper binary for Linux x64",
+  "os": [
+    "linux"
+  ],
+  "cpu": [
+    "x64"
+  ],
+  "main": "bin/driftmapper",
+  "files": [
+    "README.md",
+    "LICENSE",
+    "bin/driftmapper"
+  ],
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/DriftMapper/cli.git",
+    "directory": "npm/platforms/cli-linux-x64"
+  },
+  "license": "Apache-2.0"
+}

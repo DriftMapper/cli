@@ -7,6 +7,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"os"
@@ -22,12 +23,28 @@ import (
 // up alongside npm distribution. "dev" is correct for local/source builds.
 var version = "dev"
 
+// name is a permanent compatibility contract with npm/wrapper/lib/resolve.js's
+// PATH-fallback tier: `--version --json` is how the wrapper decides whether a
+// binary it found on PATH is actually this CLI (identifiesAsDriftmapper()).
+// Rename this, or change the JSON shape incompatibly, only in lockstep with
+// resolve.js's NAME constant — otherwise a newer wrapper silently stops
+// recognizing an older binary on PATH. See CLAUDE.md.
+const name = "driftmapper"
+
 func main() {
 	output := flag.String("output", "", "path to write build-info.html (default: $DRIFTMAPPER_BUILD_INFO_FILE, or build-info.html)")
 	showVersion := flag.Bool("version", false, "print the version and exit")
+	asJSON := flag.Bool("json", false, "with -version, print {\"name\",\"version\"} as JSON instead of plain text")
 	flag.Parse()
 
 	if *showVersion {
+		if *asJSON {
+			json.NewEncoder(os.Stdout).Encode(struct {
+				Name    string `json:"name"`
+				Version string `json:"version"`
+			}{name, version})
+			return
+		}
 		fmt.Println(version)
 		return
 	}

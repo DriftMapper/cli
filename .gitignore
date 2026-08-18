@@ -1,1 +1,5 @@
 /bin/
+node_modules/
+*.tgz
+npm/platforms/*/bin/driftmapper
+npm/platforms/*/bin/driftmapper.exe

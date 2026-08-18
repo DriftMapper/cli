@@ -1,0 +1,27 @@
+{
+  "name": "@driftmapper/cli-win32-x64",
+  "version": "0.0.0",
+  "description": "Bundled driftmapper binary for Windows x64",
+  "os": [
+    "win32"
+  ],
+  "cpu": [
+    "x64"
+  ],
+  "main": "bin/driftmapper.exe",
+  "files": [
+    "README.md",
+    "LICENSE",
+    "bin/driftmapper.exe"
+  ],
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/DriftMapper/cli.git",
+    "directory": "npm/platforms/cli-win32-x64"
+  },
+  "license": "Apache-2.0"
+}
