@@ -9,6 +9,61 @@ import (
 	"github.com/driftmapper/protocol"
 )
 
+func TestParse_RoundTripsGenerate(t *testing.T) {
+	dir := t.TempDir()
+	out := filepath.Join(dir, "build-info.html")
+	if err := Generate(out, fixtureBuild(t)); err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+
+	f, err := os.Open(out)
+	if err != nil {
+		t.Fatalf("open output: %v", err)
+	}
+	defer f.Close()
+
+	info, err := Parse(f)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	want := Info{
+		SchemaVersion:   "1",
+		BuildInstanceID: "abc123",
+		ResolutionURL:   "https://driftmapper.test/r/abc123",
+	}
+	if info != want {
+		t.Errorf("Parse = %+v, want %+v", info, want)
+	}
+}
+
+func TestParse_UnescapesEntities(t *testing.T) {
+	html := `<meta name="driftmapper:schema-version" content="1">
+<meta name="driftmapper:build-id" content="abc123">
+<meta name="driftmapper:resolution-url" content="https://driftmapper.test/r/abc123?a=1&amp;b=2">`
+
+	info, err := Parse(strings.NewReader(html))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if want := "https://driftmapper.test/r/abc123?a=1&b=2"; info.ResolutionURL != want {
+		t.Errorf("ResolutionURL = %q, want %q", info.ResolutionURL, want)
+	}
+}
+
+func TestParse_RejectsMissingBuildID(t *testing.T) {
+	html := `<meta name="driftmapper:schema-version" content="1">`
+
+	if _, err := Parse(strings.NewReader(html)); err == nil {
+		t.Error("Parse with no build-id tag: want error, got nil")
+	}
+}
+
+func TestParse_RejectsArbitraryHTML(t *testing.T) {
+	if _, err := Parse(strings.NewReader(`<html><body>not a build-info file</body></html>`)); err == nil {
+		t.Error("Parse of unrelated HTML: want error, got nil")
+	}
+}
+
 // fixtureBuild is exactly the shape a real POST /v1/builds response
 // decodes into — the point of this test file is that Generate needs
 // nothing else, per this package's doc comment.
@@ -38,6 +93,7 @@ func TestGenerate_WritesAllThreeRepresentations(t *testing.T) {
 	for _, want := range []string{
 		`<meta name="driftmapper:schema-version" content="1">`,
 		`<meta name="driftmapper:build-id" content="abc123">`,
+		`<meta name="driftmapper:resolution-url" content="https://driftmapper.test/r/abc123">`,
 		`window.location.replace("https://driftmapper.test/r/abc123")`,
 		`<a href="https://driftmapper.test/r/abc123">`,
 		`<noscript>`,
