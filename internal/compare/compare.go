@@ -18,6 +18,8 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"net/url"
+	"strings"
 
 	"github.com/driftmapper/cli/internal/buildinfo"
 )
@@ -70,4 +72,26 @@ func Run(ctx context.Context, client *http.Client, urlA, urlB string) (Result, e
 		return Result{}, err
 	}
 	return Result{A: a, B: b, Match: a.Info.BuildInstanceID == b.Info.BuildInstanceID}, nil
+}
+
+// OpenURL builds the SPA compare view URL (DRFT-29) that `-open` deep-links
+// to, given the dashboard's base origin (config.DashboardURL). Per that
+// view's own URL contract (static/apps/dashboard's compare-page.ts doc
+// comment): build-instance IDs go in a/b, the original target URLs the
+// caller passed to Run go in a_url/b_url as optional display-only labels —
+// the SPA cannot fetch a customer's deployed env itself (no CORS on an
+// arbitrary origin), so it never re-resolves them.
+func (r Result) OpenURL(dashboardURL string) (string, error) {
+	u, err := url.Parse(dashboardURL)
+	if err != nil {
+		return "", fmt.Errorf("parse dashboard URL %q: %w", dashboardURL, err)
+	}
+	u.Path = strings.TrimSuffix(u.Path, "/") + "/compare"
+	q := url.Values{}
+	q.Set("a", r.A.Info.BuildInstanceID)
+	q.Set("b", r.B.Info.BuildInstanceID)
+	q.Set("a_url", r.A.URL)
+	q.Set("b_url", r.B.URL)
+	u.RawQuery = q.Encode()
+	return u.String(), nil
 }

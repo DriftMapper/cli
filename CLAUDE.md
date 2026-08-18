@@ -38,6 +38,7 @@ reading this while rebuilding it a *third* time: check `git push` actually happe
 go vet ./... && go test ./...
 go build -o bin/driftmapper ./cmd/driftmapper
 ./bin/driftmapper compare <build-info-url-a> <build-info-url-b>   # unauth, no server needed to try locally against two files served over HTTP
+DRIFTMAPPER_DASHBOARD_URL=https://... ./bin/driftmapper compare -open <build-info-url-a> <build-info-url-b>   # DRFT-36; -open has no default dashboard origin, see internal/config
 
 make check      # everything CI runs: go vet+test, npm unit tests, pack-and-install e2e
 make cross       # cross-compile all six release targets + reproducibility check
@@ -56,7 +57,9 @@ cmd/driftmapper/main.go   entry point; dispatches to `compare` before the defaul
                           with the npm launcher, see gotcha below
 internal/
   config/                 DRIFTMAPPER_API_URL / DRIFTMAPPER_OIDC_AUDIENCE / build-info
-                          path, all zero-config-by-default (spec §5.2a)
+                          path, all zero-config-by-default (spec §5.2a). DashboardURL
+                          (DRIFTMAPPER_DASHBOARD_URL, DRFT-36) is the one exception — no
+                          default, since no dashboard deploy origin is decided yet
   oidcclient/             acquires (never verifies) a workload OIDC token — v1 is GitHub
                           Actions only (spec §4.3/§4.4); verification is exclusively
                           server-side (spec §5.2: "must never ship in a binary running on
@@ -72,7 +75,11 @@ internal/
                           (driftmapper/protocol's openapi.yaml)
   compare/                 `driftmapper compare`'s fetch-and-diff logic (spec DRFT-26) —
                           two build-info.html GETs and a build_instance_id equality check,
-                          no apiclient involved
+                          no apiclient involved. OpenURL (DRFT-36) builds the SPA compare
+                          view URL for `-open`, per that view's own URL contract
+  browser/                 cross-platform "open a URL in the default browser" launcher used
+                          only by `compare -open` (DRFT-36) — open/xdg-open/cmd dispatch on
+                          GOOS, split so the dispatch itself is unit-testable
 npm/
   wrapper/                the package users install: bin/index.js (launcher shim),
                           lib/resolve.js (resolution chain + PATH-fallback guard), test/
@@ -183,8 +190,10 @@ per-field data.
 So `compare` reads only `build-info.html`'s own `driftmapper:*` meta tags (schema-version,
 build-id, resolution-url — the same file `internal/buildinfo.Generate` writes) and diffs on
 `build_instance_id` alone: same ID means same build, different ID means drift, with no detail
-on *what* differs. `--open`'s SPA hand-off (DRFT-29) is the path to richer, authenticated
-diffs — it isn't implemented here, since the SPA it deep-links to doesn't exist yet.
+on *what* differs. `-open`'s SPA hand-off (DRFT-29) is the path to richer, authenticated
+diffs, and is now implemented (DRFT-36) — it deep-links to `/compare?a=<id>&b=<id>&a_url=…
+&b_url=…` on `DRIFTMAPPER_DASHBOARD_URL`, letting the SPA (with whatever session the user's
+browser carries) do the authenticated field-by-field diff the CLI itself still can't.
 
 A richer unauthenticated diff would need one of: new structured `driftmapper:*` meta tags on
 the resolution page (additive, no API/schema change — the natural next step, flagged as a

@@ -8,6 +8,8 @@
 // user-invoked diff of two already-deployed targets, dispatched on before
 // the default action's own flag.Parse() ever runs — see runCompare and
 // internal/compare's doc comment for why it stays intentionally thin.
+// `-open` (DRFT-36) deep-links to the SPA compare view (DRFT-29) instead of
+// printing the diff — see openCompareResult.
 package main
 
 import (
@@ -20,6 +22,7 @@ import (
 	"os"
 
 	"github.com/driftmapper/cli/internal/apiclient"
+	"github.com/driftmapper/cli/internal/browser"
 	"github.com/driftmapper/cli/internal/buildcontext"
 	"github.com/driftmapper/cli/internal/buildinfo"
 	"github.com/driftmapper/cli/internal/compare"
@@ -38,6 +41,10 @@ var version = "dev"
 // resolve.js's NAME constant — otherwise a newer wrapper silently stops
 // recognizing an older binary on PATH. See CLAUDE.md.
 const name = "driftmapper"
+
+// browserOpen is a package-level indirection to browser.Open, swapped out
+// in tests so `compare -open` doesn't spawn a real browser process.
+var browserOpen = browser.Open
 
 func main() {
 	// Dispatched before flag.Parse() below, so "compare" can never collide
@@ -110,8 +117,9 @@ func runCompare(ctx context.Context, args []string, stdout, stderr io.Writer) in
 	fs := flag.NewFlagSet("compare", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	asJSON := fs.Bool("json", false, "print the result as JSON instead of human-readable text")
+	open := fs.Bool("open", false, "open the SPA compare view (DRFT-29) in a browser instead of printing the diff")
 	fs.Usage = func() {
-		fmt.Fprintln(stderr, "usage: driftmapper compare [-json] <build-info-url-a> <build-info-url-b>")
+		fmt.Fprintln(stderr, "usage: driftmapper compare [-json] [-open] <build-info-url-a> <build-info-url-b>")
 		fs.PrintDefaults()
 	}
 	if err := fs.Parse(args); err != nil {
@@ -121,6 +129,10 @@ func runCompare(ctx context.Context, args []string, stdout, stderr io.Writer) in
 		fs.Usage()
 		return 2
 	}
+	if *asJSON && *open {
+		fmt.Fprintln(stderr, "driftmapper: -json and -open are mutually exclusive")
+		return 2
+	}
 
 	result, err := compare.Run(ctx, http.DefaultClient, fs.Arg(0), fs.Arg(1))
 	if err != nil {
@@ -128,7 +140,12 @@ func runCompare(ctx context.Context, args []string, stdout, stderr io.Writer) in
 		return 2
 	}
 
-	if *asJSON {
+	if *open {
+		if err := openCompareResult(stdout, stderr, result); err != nil {
+			fmt.Fprintln(stderr, "driftmapper:", err)
+			return 2
+		}
+	} else if *asJSON {
 		json.NewEncoder(stdout).Encode(result)
 	} else {
 		printCompareResult(stdout, result)
@@ -138,6 +155,29 @@ func runCompare(ctx context.Context, args []string, stdout, stderr io.Writer) in
 		return 0
 	}
 	return 1
+}
+
+// openCompareResult builds the SPA compare view URL for result and launches
+// it in the user's browser, printing the URL either way so it's still
+// usable if the launch fails or the environment has no browser (e.g. a
+// headless CI runner — -open is meant for laptop use, but nothing stops it
+// from being invoked there).
+func openCompareResult(stdout, stderr io.Writer, result compare.Result) error {
+	dashboardURL := config.DashboardURL()
+	if dashboardURL == "" {
+		return fmt.Errorf("-open requires DRIFTMAPPER_DASHBOARD_URL to be set (no default dashboard origin exists yet)")
+	}
+
+	compareURL, err := result.OpenURL(dashboardURL)
+	if err != nil {
+		return fmt.Errorf("build compare URL: %w", err)
+	}
+
+	fmt.Fprintf(stdout, "Opening comparison: %s\n", compareURL)
+	if err := browserOpen(compareURL); err != nil {
+		fmt.Fprintln(stderr, "driftmapper: could not open browser automatically:", err)
+	}
+	return nil
 }
 
 func printCompareResult(w io.Writer, r compare.Result) {
