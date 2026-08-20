@@ -44,15 +44,15 @@ steps:
       DRIFTMAPPER_CHALLENGE: ${{ secrets.DRIFTMAPPER_CHALLENGE }}
 ```
 
-No separate command and nothing to remove afterward: `driftmapper` redeems the challenge
-before registering whenever the env var is set, and does nothing extra when it's absent
-(including every run after the repository is already bound). On a successful redemption
-it prints a reminder that the secret can now be deleted — a challenge is single-use, so an
-already-redeemed value left in place is inert on every subsequent run, but a **fresh**
-invalid or expired one fails the run loudly rather than silently registering an unbound
-build, since at that point you believe you're onboarding. Building a run without a
-repository binding at all works too (spec §2.2a) — `DRIFTMAPPER_CHALLENGE` is only ever
-needed once, the first time.
+No separate command: `driftmapper` redeems the challenge before registering whenever the
+env var is set, and does nothing extra when it's absent. **Do remove the secret after the
+first successful run** — `driftmapper` prints a reminder when it redeems successfully, and
+you should act on it. A challenge is single-use, and the server can't tell "this value was
+already redeemed" apart from "this value was never valid" (by design, so a guessing
+attacker learns nothing either way) — so a repo secret left in place after binding makes
+every later run fail exactly as loudly as a genuinely bad challenge would, not silently
+succeed. Running without a repository binding at all works fine (spec §2.2a) —
+`DRIFTMAPPER_CHALLENGE` is only ever needed for the one run that does the binding.
 
 ### Comparing two builds
 
