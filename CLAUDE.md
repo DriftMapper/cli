@@ -10,9 +10,9 @@ Driftmapper (spec §5.2a). Its default action (no subcommand) is **write-only an
 single-action**: acquire a workload OIDC token, `POST /v1/builds`, write `build-info.html`
 from the response.
 
-`compare` (spec DRFT-26) is the one read subcommand, added deliberately narrow: it fetches
-`build-info.html` from two already-deployed targets and diffs on `build_instance_id` only, no
-API call. See "Gotcha — `compare` is thin on purpose" below for why it can't yet do more.
+`compare` (spec DRFT-50, superseding DRFT-26) is the one other subcommand — a pure browser
+launcher for the SPA compare view (DRFT-29, `driftmapper/static`), with zero network calls of
+its own. See "Gotcha — `compare` is a browser launcher, not a read command" below.
 
 Distributed via npm (`npx @driftmapper/cli`) with per-platform binaries resolved through npm's
 `os`/`cpu` fields as `optionalDependencies`, plus raw binaries on GitHub Releases as a fallback
@@ -69,16 +69,16 @@ internal/
                           are deliberately NOT here; they're token-derived and the server
                           rejects them if present in the body
   buildinfo/               generates build-info.html (spec §2.3) as a pure function of one
-                          server response — no server call, no computed values. Parse is
-                          the read-side counterpart, used only by compare/ below.
+                          server response — no server call, no computed values. No read
+                          side as of DRFT-50 — see the compare/ entry below
   apiclient/               POST /v1/builds client for the {"data"}/{"error"} envelope
                           (driftmapper/protocol's openapi.yaml)
-  compare/                 `driftmapper compare`'s fetch-and-diff logic (spec DRFT-26) —
-                          two build-info.html GETs and a build_instance_id equality check,
-                          no apiclient involved. OpenURL (DRFT-36) builds the SPA compare
-                          view URL for `-open`, per that view's own URL contract
+  compare/                 `driftmapper compare`'s URL-building logic (spec DRFT-50) —
+                          OpenURL builds the SPA compare view URL from two build-instance
+                          IDs the caller already supplied, per that view's own URL
+                          contract. No apiclient, no HTTP fetch, no parsing of anything
   browser/                 cross-platform "open a URL in the default browser" launcher used
-                          only by `compare -open` (DRFT-36) — open/xdg-open/cmd dispatch on
+                          by `compare` (DRFT-36/DRFT-50) — open/xdg-open/cmd dispatch on
                           GOOS, split so the dispatch itself is unit-testable
 npm/
   wrapper/                the package users install: bin/index.js (launcher shim),
@@ -175,31 +175,25 @@ without a gate, the very first tag push would red-X on `publish-npm`. The job is
 seven `@driftmapper/cli*` packages have trusted publishers configured for this repo+workflow on
 npmjs.com.
 
-## Gotcha — `compare` is thin on purpose, and why
+## Gotcha — `compare` is a browser launcher, not a read command, and why
 
-DRFT-26's ticket text describes diffing `(repository_id, commit_sha, ref, workflow, run_id,
-run_attempt)` unauthenticated. That's not implementable as written: `protocol/openapi.yaml`
-puts every one of those fields on `Build`, the `userSession`-only authenticated tier —
-`BuildPublic` (the unauth tier) has only `build_instance_id`/`repository_name`/`built_at` —
-and there is no unauth JSON endpoint at all (`getBuild` requires a session; the spec's own
-words: "the public tier exists only as server-rendered HTML and OG tags"). Worse, even
-`repository_name`/`built_at` aren't machine-parseable anywhere unauth today — the resolution
-page's OG tags are human prose ("Registered {{date}}. Sign in for full build details."), not
-per-field data.
+DRFT-26's original design fetched `build-info.html` unauthenticated from two deployed targets
+and parsed its `driftmapper:*` meta tags client-side to diff `build_instance_id` locally. That
+was a read command in everything but name, and it directly contradicted this CLI's founding
+rule (spec DRFT-21: "No read commands. Viewing a build happens by opening the build-info file
+— that's the core loop"). It was also the only remaining consumer forcing the resolution page
+(`/r/<id>`) to keep an unauthenticated rendering branch alive "for the CLI" — DRFT-51 later
+settled that branch stays anyway (for Slack link unfurls), independent of anything here.
 
-So `compare` reads only `build-info.html`'s own `driftmapper:*` meta tags (schema-version,
-build-id, resolution-url — the same file `internal/buildinfo.Generate` writes) and diffs on
-`build_instance_id` alone: same ID means same build, different ID means drift, with no detail
-on *what* differs. `-open`'s SPA hand-off (DRFT-29) is the path to richer, authenticated
-diffs, and is now implemented (DRFT-36) — it deep-links to `/compare?a=<id>&b=<id>&a_url=…
-&b_url=…` on `DRIFTMAPPER_DASHBOARD_URL`, letting the SPA (with whatever session the user's
-browser carries) do the authenticated field-by-field diff the CLI itself still can't.
-
-A richer unauthenticated diff would need one of: new structured `driftmapper:*` meta tags on
-the resolution page (additive, no API/schema change — the natural next step, flagged as a
-follow-up rather than done here to keep this ticket's blast radius to the CLI repo alone), or
-a deliberate decision to promote a `BuildPublic`-shaped endpoint to unauthenticated. Don't
-silently expand what `compare` diffs without one of those landing first.
+DRFT-50 stripped all of that: `internal/compare` performs zero HTTP fetches and parses
+nothing. `driftmapper compare <build-id-a> <build-id-b>` only builds the SPA compare view URL
+(`/compare?a=<id>&b=<id>[&a_url=…&b_url=…]` on `DRIFTMAPPER_DASHBOARD_URL`, DRFT-29's
+contract) and opens it — the browser does the read, with whatever WorkOS session it carries.
+The two build-instance IDs are the caller's responsibility to already have, read directly off
+each target's `build-info.html` (DRFT-52 bakes both `build_instance_id` and `built_at` in as
+visible page content precisely so this is a copy-paste, not a curl). There is deliberately no
+`-open` flag (opening the browser is the only mode) and no exit-code-based diff result (the
+CLI itself no longer knows whether the builds match — only the browser does).
 
 ## The `protocol` dependency is public for a reason
 
