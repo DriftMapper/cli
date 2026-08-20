@@ -69,8 +69,10 @@ internal/
                           are deliberately NOT here; they're token-derived and the server
                           rejects them if present in the body
   buildinfo/               generates build-info.html (spec §2.3) as a pure function of one
-                          server response — no server call, no computed values. No read
-                          side as of DRFT-50 — see the compare/ entry below
+                          server response — no server call. The one derived value is the
+                          click-only sign-in link (DRFT-52): `/login?next=<resolution
+                          path>` on resolution_url's own origin, not a server-provided
+                          field. No read side as of DRFT-50 — see the compare/ entry below
   apiclient/               POST /v1/builds client for the {"data"}/{"error"} envelope
                           (driftmapper/protocol's openapi.yaml)
   compare/                 `driftmapper compare`'s URL-building logic (spec DRFT-50) —
