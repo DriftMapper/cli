@@ -4,12 +4,11 @@
 // and every existing pinned CI invocation calls it exactly this way, so
 // that path must never change shape.
 //
-// `compare` (spec DRFT-26) is the one read subcommand: an unauthenticated,
-// user-invoked diff of two already-deployed targets, dispatched on before
+// `compare` (spec DRFT-50) is the one read subcommand: an unauthenticated
+// browser launcher for the SPA compare view (DRFT-29), dispatched on before
 // the default action's own flag.Parse() ever runs — see runCompare and
-// internal/compare's doc comment for why it stays intentionally thin.
-// `-open` (DRFT-36) deep-links to the SPA compare view (DRFT-29) instead of
-// printing the diff — see openCompareResult.
+// internal/compare's doc comment for why it performs no network calls of
+// its own.
 package main
 
 import (
@@ -18,7 +17,6 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"net/http"
 	"os"
 
 	"github.com/driftmapper/cli/internal/apiclient"
@@ -109,17 +107,22 @@ func run(ctx context.Context, output string) error {
 	return nil
 }
 
-// runCompare implements `driftmapper compare <url-a> <url-b> [-json]`.
-// Exit codes follow diff(1)'s convention, since CI is the primary caller
-// (spec DRFT-26's open question on this): 0 the two targets are the same
-// build, 1 they differ (drift), 2 usage or fetch/parse error.
+// runCompare implements `driftmapper compare <build-id-a> <build-id-b>`
+// (spec DRFT-50): a pure browser launcher, no network calls. It always
+// opens the SPA compare view (DRFT-29) — there is no other mode, so unlike
+// most flags here there is nothing to gate behind one — and always prints
+// the URL it built, so it's still usable if the launch fails or the
+// environment has no browser (e.g. a headless/SSH context). Exit code 2 is
+// reserved for usage/config errors; a successful launch (browser opened or
+// not) is always 0, since this command no longer computes any diff result
+// of its own to report via exit code.
 func runCompare(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("compare", flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	asJSON := fs.Bool("json", false, "print the result as JSON instead of human-readable text")
-	open := fs.Bool("open", false, "open the SPA compare view (DRFT-29) in a browser instead of printing the diff")
+	labelA := fs.String("a-url", "", "optional display label for the first build (e.g. its deployed URL)")
+	labelB := fs.String("b-url", "", "optional display label for the second build (e.g. its deployed URL)")
 	fs.Usage = func() {
-		fmt.Fprintln(stderr, "usage: driftmapper compare [-json] [-open] <build-info-url-a> <build-info-url-b>")
+		fmt.Fprintln(stderr, "usage: driftmapper compare [-a-url=<label>] [-b-url=<label>] <build-instance-id-a> <build-instance-id-b>")
 		fs.PrintDefaults()
 	}
 	if err := fs.Parse(args); err != nil {
@@ -129,71 +132,23 @@ func runCompare(ctx context.Context, args []string, stdout, stderr io.Writer) in
 		fs.Usage()
 		return 2
 	}
-	if *asJSON && *open {
-		fmt.Fprintln(stderr, "driftmapper: -json and -open are mutually exclusive")
+
+	dashboardURL := config.DashboardURL()
+	if dashboardURL == "" {
+		fmt.Fprintln(stderr, "driftmapper: compare requires DRIFTMAPPER_DASHBOARD_URL to be set (no default dashboard origin exists yet)")
 		return 2
 	}
 
-	result, err := compare.Run(ctx, http.DefaultClient, fs.Arg(0), fs.Arg(1))
+	result := compare.Result{IDA: fs.Arg(0), IDB: fs.Arg(1), LabelA: *labelA, LabelB: *labelB}
+	compareURL, err := result.OpenURL(dashboardURL)
 	if err != nil {
 		fmt.Fprintln(stderr, "driftmapper:", err)
 		return 2
-	}
-
-	if *open {
-		if err := openCompareResult(stdout, stderr, result); err != nil {
-			fmt.Fprintln(stderr, "driftmapper:", err)
-			return 2
-		}
-	} else if *asJSON {
-		json.NewEncoder(stdout).Encode(result)
-	} else {
-		printCompareResult(stdout, result)
-	}
-
-	if result.Match {
-		return 0
-	}
-	return 1
-}
-
-// openCompareResult builds the SPA compare view URL for result and launches
-// it in the user's browser, printing the URL either way so it's still
-// usable if the launch fails or the environment has no browser (e.g. a
-// headless CI runner — -open is meant for laptop use, but nothing stops it
-// from being invoked there).
-func openCompareResult(stdout, stderr io.Writer, result compare.Result) error {
-	dashboardURL := config.DashboardURL()
-	if dashboardURL == "" {
-		return fmt.Errorf("-open requires DRIFTMAPPER_DASHBOARD_URL to be set (no default dashboard origin exists yet)")
-	}
-
-	compareURL, err := result.OpenURL(dashboardURL)
-	if err != nil {
-		return fmt.Errorf("build compare URL: %w", err)
 	}
 
 	fmt.Fprintf(stdout, "Opening comparison: %s\n", compareURL)
 	if err := browserOpen(compareURL); err != nil {
 		fmt.Fprintln(stderr, "driftmapper: could not open browser automatically:", err)
 	}
-	return nil
-}
-
-func printCompareResult(w io.Writer, r compare.Result) {
-	printTarget := func(label string, t compare.Target) {
-		fmt.Fprintf(w, "%s  %s\n", label, t.URL)
-		fmt.Fprintf(w, "   build  %s\n", t.Info.BuildInstanceID)
-		if t.Info.ResolutionURL != "" {
-			fmt.Fprintf(w, "   view   %s\n", t.Info.ResolutionURL)
-		}
-	}
-	printTarget("A", r.A)
-	printTarget("B", r.B)
-
-	if r.Match {
-		fmt.Fprintln(w, "\nsame build")
-		return
-	}
-	fmt.Fprintln(w, "\ndrift detected: different builds")
+	return 0
 }

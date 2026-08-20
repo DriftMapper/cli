@@ -10,13 +10,10 @@ package buildinfo
 
 import (
 	"fmt"
-	htmlpkg "html"
 	"html/template"
-	"io"
 	"net/url"
 	"os"
 	"path/filepath"
-	"regexp"
 	"time"
 
 	"github.com/driftmapper/protocol"
@@ -137,46 +134,4 @@ func loginURL(resolutionURL string) (string, error) {
 	q.Set("next", next)
 	login.RawQuery = q.Encode()
 	return login.String(), nil
-}
-
-// metaTagPattern matches exactly the driftmapper:* meta tags Generate
-// writes. Parse looks for these three tags specifically rather than
-// general HTML, so it tolerates anything about the surrounding markup
-// changing except its own contract.
-var metaTagPattern = regexp.MustCompile(`<meta name="driftmapper:([a-z-]+)" content="([^"]*)">`)
-
-// Info is a build-info.html file's contents, decoded back into the fields
-// Generate wrote — the read-side counterpart used by `driftmapper compare`
-// (spec DRFT-26) to fetch and diff two deployed targets unauthenticated.
-type Info struct {
-	SchemaVersion   string `json:"schema_version"`
-	BuildInstanceID string `json:"build_instance_id"`
-	ResolutionURL   string `json:"resolution_url,omitempty"`
-}
-
-// Parse extracts Info from a build-info.html document. BuildInstanceID is
-// required; SchemaVersion and ResolutionURL are populated when present but
-// not validated, since a future schema version may carry neither in the
-// same shape and Parse must keep working for identifying the build either
-// way.
-func Parse(r io.Reader) (Info, error) {
-	b, err := io.ReadAll(r)
-	if err != nil {
-		return Info{}, fmt.Errorf("read build-info.html: %w", err)
-	}
-
-	tags := map[string]string{}
-	for _, m := range metaTagPattern.FindAllSubmatch(b, -1) {
-		tags[string(m[1])] = htmlpkg.UnescapeString(string(m[2]))
-	}
-
-	info := Info{
-		SchemaVersion:   tags["schema-version"],
-		BuildInstanceID: tags["build-id"],
-		ResolutionURL:   tags["resolution-url"],
-	}
-	if info.BuildInstanceID == "" {
-		return Info{}, fmt.Errorf("missing driftmapper:build-id meta tag")
-	}
-	return info, nil
 }

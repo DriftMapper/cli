@@ -2,8 +2,8 @@
 
 The Driftmapper CLI: registers a build from inside your CI so Driftmapper can track it.
 The default action is write-only — it acquires a workload OIDC token, calls `POST
-/v1/builds`, and writes `build-info.html`. `compare` (below) is the one read command, and it
-stays unauthenticated rather than calling the API.
+/v1/builds`, and writes `build-info.html`. `compare` (below) is the one other command, and it
+makes zero network calls of its own — it's a browser launcher, not a read command.
 
 ## Install and use
 
@@ -31,20 +31,21 @@ steps:
   - run: npx @driftmapper/cli
 ```
 
-### Comparing two deployed environments
+### Comparing two builds
 
 ```bash
-driftmapper compare https://staging.example.com/build-info.html https://prod.example.com/build-info.html
+DRIFTMAPPER_DASHBOARD_URL=https://app.driftmapper.com \
+  driftmapper compare <build-instance-id-a> <build-instance-id-b>
 ```
 
-Fetches `build-info.html` from each URL (no credentials, no API call) and reports whether
-they're the same build. `--json` prints a machine-readable result instead. Exit code follows
-`diff(1)`: `0` same build, `1` drift detected, `2` usage or fetch error — so it works directly
-as a CI gate.
+Opens the SPA compare view in your browser for an authenticated, session-aware,
+field-by-field diff — read the two build-instance IDs off each target's `build-info.html`
+first (they're shown directly on the page, no request required). `-a-url`/`-b-url` optionally
+label each side in that view (e.g. with the deployed URL they came from). If a browser can't
+be launched (headless/SSH), the URL is printed to stdout instead so it's still usable.
 
-This is deliberately thin: it only tells you *whether* two targets match, not what changed.
-The only field disclosed unauthenticated today is the build ID itself — see
-[CLAUDE.md](CLAUDE.md) for why a richer diff isn't available yet.
+`compare` makes no network calls and requires `DRIFTMAPPER_DASHBOARD_URL` — there's no default
+dashboard origin yet.
 
 ### Environment variables
 
@@ -53,6 +54,7 @@ The only field disclosed unauthenticated today is the build ID itself — see
 | `DRIFTMAPPER_API_URL` | `https://api.driftmapper.com` | API base URL |
 | `DRIFTMAPPER_OIDC_AUDIENCE` | `https://driftmapper.com` | `aud` claim requested from the CI provider |
 | `DRIFTMAPPER_BUILD_INFO_FILE` | `build-info.html` | Output path (overridable per-run via `--output`) |
+| `DRIFTMAPPER_DASHBOARD_URL` | — | Dashboard SPA origin `compare` opens (required for `compare`; no default) |
 | `DRIFTMAPPER_BINARY_PATH` | — | Absolute path to a binary the npm launcher should run instead of resolving one |
 
 ## No npm? Download a raw binary
