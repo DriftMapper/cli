@@ -4,6 +4,12 @@
 // and every existing pinned CI invocation calls it exactly this way, so
 // that path must never change shape.
 //
+// When $DRIFTMAPPER_CHALLENGE is set (spec §4.5, DRFT-66), the default
+// action first redeems it — binding the repository to an org — before
+// registering. This is still a write, not a read: see maybeAuthorize and
+// its own doc comment for why it's folded into register rather than a
+// separate command, and how its failure modes are handled.
+//
 // `compare` (spec DRFT-50) is the one read subcommand: an unauthenticated
 // browser launcher for the SPA compare view (DRFT-29), dispatched on before
 // the default action's own flag.Parse() ever runs — see runCompare and
@@ -87,6 +93,10 @@ func run(ctx context.Context, output string) error {
 	}
 
 	client := apiclient.New(config.APIURL(), token)
+	if err := maybeAuthorize(ctx, os.Stdout, client, config.Challenge()); err != nil {
+		return err
+	}
+
 	build, created, err := client.RegisterBuild(ctx, reg)
 	if err != nil {
 		return fmt.Errorf("register build: %w", err)
@@ -104,6 +114,41 @@ func run(ctx context.Context, output string) error {
 		verb = "Already registered (idempotent retry)"
 	}
 	fmt.Printf("%s build %s -> %s\n", verb, build.BuildInstanceId, output)
+	return nil
+}
+
+// maybeAuthorize redeems challenge via client.AuthorizeRepository when set,
+// before register ever calls RegisterBuild (spec §4.5, DRFT-66). A no-op
+// when challenge is empty — most invocations, since a repository only needs
+// binding once.
+//
+// Folded into register rather than a separate `authorize` command
+// (DRFT-66's own decision record): one CI snippet, added once and never
+// edited, works identically on the first run and every run after. That
+// means this makes register's first invocation do something later ones
+// don't (slot consumption, policy creation) — the success message below
+// exists specifically to surface that distinctly, not bury it in the
+// ordinary "Registered build ..." line.
+//
+// Every redemption failure is fail-loud and never falls through to
+// RegisterBuild, matching DRFT-66's acceptance criteria — including
+// `invalid_challenge`, even though the server deliberately returns that
+// same code for "this challenge was already redeemed" as it does for a
+// genuinely bad value (spec §4.5's anti-enumeration rule: never let a
+// caller distinguish the two). That collapsing means a challenge secret
+// left in place after a successful bind will make every subsequent run
+// fail here too — the success message's reminder to remove the secret is
+// the mitigation, not a client-side guess at which case occurred.
+func maybeAuthorize(ctx context.Context, w io.Writer, client *apiclient.Client, challenge string) error {
+	if challenge == "" {
+		return nil
+	}
+	auth, err := client.AuthorizeRepository(ctx, challenge)
+	if err != nil {
+		return fmt.Errorf("authorize repository: %w", err)
+	}
+	fmt.Fprintf(w, "Authorized repository %s for org %s (challenge redeemed) — you can now remove DRIFTMAPPER_CHALLENGE\n",
+		auth.RepositoryId, auth.OrganizationId)
 	return nil
 }
 

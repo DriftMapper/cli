@@ -32,13 +32,25 @@ func BuildInfoFile() string {
 }
 
 // DashboardURL is the SPA dashboard's base origin, used only to construct
-// `driftmapper compare -open`'s deep link (DRFT-36). Deliberately has no
-// default: unlike the API and OIDC audience, no dashboard deployment origin
-// has been decided anywhere in this org yet (driftmapper/static's apps/dashboard
-// has no production deploy target as of this writing). Returns "" when unset;
-// callers must treat that as "-open is unusable" rather than guessing a host.
+// `driftmapper compare`'s SPA compare-view URL (DRFT-36/DRFT-50). Deliberately
+// has no default: unlike the API and OIDC audience, no dashboard deployment
+// origin has been decided anywhere in this org yet (driftmapper/static's
+// apps/dashboard has no production deploy target as of this writing). Returns
+// "" when unset; callers must treat that as "compare is unusable" rather than
+// guessing a host.
 func DashboardURL() string {
 	return os.Getenv("DRIFTMAPPER_DASHBOARD_URL")
+}
+
+// Challenge is the single-use repository-authorization value issued by the
+// dashboard (spec §4.5, DRFT-61) and presented to `POST
+// /v1/repositories/authorize` (DRFT-66). Deliberately has no default and is
+// read only from the environment, never a flag — flags land in process
+// listings and CI logs, and this is a bearer secret. Empty means "no
+// challenge to redeem"; callers must not treat that as an error, since
+// registration never requires one (spec §2.2a/DRFT-23).
+func Challenge() string {
+	return os.Getenv("DRIFTMAPPER_CHALLENGE")
 }
 
 func orDefault(env, def string) string {
