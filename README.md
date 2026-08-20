@@ -45,14 +45,13 @@ steps:
 ```
 
 No separate command: `driftmapper` redeems the challenge before registering whenever the
-env var is set, and does nothing extra when it's absent. **Do remove the secret after the
-first successful run** — `driftmapper` prints a reminder when it redeems successfully, and
-you should act on it. A challenge is single-use, and the server can't tell "this value was
-already redeemed" apart from "this value was never valid" (by design, so a guessing
-attacker learns nothing either way) — so a repo secret left in place after binding makes
-every later run fail exactly as loudly as a genuinely bad challenge would, not silently
-succeed. Running without a repository binding at all works fine (spec §2.2a) —
-`DRIFTMAPPER_CHALLENGE` is only ever needed for the one run that does the binding.
+env var is set, and does nothing extra when it's absent. Leaving the secret in place after
+the first successful run is harmless — redeeming an already-consumed challenge from the
+same repository it originally bound succeeds again rather than erroring — but there's no
+reason to keep it around either, so `driftmapper` prints a reminder you can act on when it
+redeems. Running without a repository binding at all works fine too (spec §2.2a) —
+`DRIFTMAPPER_CHALLENGE` only needs to be set for the run that does the binding, whenever
+that happens to be.
 
 ### Comparing two builds
 

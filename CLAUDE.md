@@ -212,19 +212,21 @@ drop-off point in the self-serve funnel DRFT-59 restored. Folding into the defau
 `$DRIFTMAPPER_CHALLENGE` (`maybeAuthorize` in `cmd/driftmapper/main.go`, called before
 `RegisterBuild`) means one CI snippet, added once, never edited.
 
-**The server cannot tell "already redeemed by me, harmless" apart from "genuinely invalid"
-— design around that, don't paper over it.** `RedeemChallenge`
+**`maybeAuthorize` fails loud on every redemption error, on purpose — and relies on the
+server making replay safe, not on guessing at the response.** `RedeemChallenge`
 (`driftmapper/server`'s `internal/store/challenge.go`) deliberately collapses "never
-existed", "expired", "revoked", "already redeemed", and "over attempt cap" into one
-`invalid_challenge` error (spec §4.5's anti-enumeration rule). That means a challenge secret
-left in a repo after a successful first bind makes every later `maybeAuthorize` call fail
-with the exact same code a genuinely broken challenge would. `maybeAuthorize` fails loud on
-*every* redemption error regardless — matching DRFT-66's acceptance criteria, since a
-first-ever broken challenge must not silently degrade into an unbound, rate-limited build
-that mysteriously fails weeks later. The mitigation is the success-path reminder to delete
-the secret, not a client-side guess at which error case occurred. If this ever gets
-revisited: the real fix is server-side (making redemption idempotent for the exact-same-
-repo-same-org replay case), not something this CLI can safely infer from the response alone.
+existed", "expired", "revoked", and "over attempt cap" into one `invalid_challenge` error
+(spec §4.5's anti-enumeration rule) — a first-ever broken challenge must fail loud here,
+matching DRFT-66's acceptance criteria, rather than silently degrading into an unbound,
+rate-limited build that mysteriously fails weeks later. That's also why this CLI never
+special-cases `invalid_challenge` to swallow it: from the response alone, this code cannot
+tell "genuinely broken" apart from "already redeemed by me, harmless." What makes fail-loud
+safe for the harmless case too is server-side, not client-side: DRFT-74 made `RedeemChallenge`
+idempotent for the exact-same-repo replay (an already-redeemed challenge presented again by
+the repository it originally bound succeeds again, rather than erroring), so a
+`DRIFTMAPPER_CHALLENGE` secret left in place after binding doesn't actually break later
+runs — this CLI just doesn't (and shouldn't) know that from here; it relies on the server
+having made it true.
 
 ## The `protocol` dependency is public for a reason
 

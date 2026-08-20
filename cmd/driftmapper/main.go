@@ -132,13 +132,17 @@ func run(ctx context.Context, output string) error {
 //
 // Every redemption failure is fail-loud and never falls through to
 // RegisterBuild, matching DRFT-66's acceptance criteria — including
-// `invalid_challenge`, even though the server deliberately returns that
-// same code for "this challenge was already redeemed" as it does for a
-// genuinely bad value (spec §4.5's anti-enumeration rule: never let a
-// caller distinguish the two). That collapsing means a challenge secret
-// left in place after a successful bind will make every subsequent run
-// fail here too — the success message's reminder to remove the secret is
-// the mitigation, not a client-side guess at which case occurred.
+// `invalid_challenge`, which the server also returns for "this challenge
+// was already redeemed," identically to a genuinely bad value (spec
+// §4.5's anti-enumeration rule: never let a caller distinguish the two).
+// That would make a challenge secret left in place after a successful
+// bind fail every subsequent run — except DRFT-74 makes the server side
+// of that specific case idempotent (a repeat presentation of an
+// already-redeemed challenge, from the same repository it originally
+// bound, succeeds again rather than erroring), so in practice this
+// doesn't happen. The success message below still recommends removing the
+// secret — no reason to leave one around longer than needed — it's just
+// no longer load-bearing for correctness the way it was before DRFT-74.
 func maybeAuthorize(ctx context.Context, w io.Writer, client *apiclient.Client, challenge string) error {
 	if challenge == "" {
 		return nil
