@@ -127,3 +127,78 @@ func TestRegisterBuild_UnknownFieldRejection(t *testing.T) {
 		t.Errorf("StatusCode = %d, want %d", apiErr.StatusCode, http.StatusBadRequest)
 	}
 }
+
+func TestAuthorizeRepository_Success(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.URL.Path; got != "/v1/repositories/authorize" {
+			t.Errorf("path = %q, want /v1/repositories/authorize", got)
+		}
+		if got := r.Header.Get("Authorization"); got != "Bearer tok" {
+			t.Errorf("Authorization = %q, want %q", got, "Bearer tok")
+		}
+		var body protocol.RepositoryAuthorizeRequest
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatalf("decode request body: %v", err)
+		}
+		if body.Challenge != "chal_abc" {
+			t.Errorf("request challenge = %q, want %q", body.Challenge, "chal_abc")
+		}
+
+		w.WriteHeader(http.StatusCreated)
+		json.NewEncoder(w).Encode(map[string]any{
+			"data": protocol.RepositoryAuthorization{RepositoryId: "repo1", OrganizationId: "org1"},
+		})
+	}))
+	defer srv.Close()
+
+	client := New(srv.URL, "tok")
+	auth, err := client.AuthorizeRepository(context.Background(), "chal_abc")
+	if err != nil {
+		t.Fatalf("AuthorizeRepository: %v", err)
+	}
+	if auth.RepositoryId != "repo1" || auth.OrganizationId != "org1" {
+		t.Errorf("auth = %+v, want repository_id=repo1 organization_id=org1", auth)
+	}
+}
+
+// TestAuthorizeRepository_ErrorCodes covers each distinct redemption failure
+// mode the server documents (openapi.yaml's authorizeRepository operation) —
+// the CLI branches on none of these individually (Decision 3: fail loud on
+// any redemption error), but each must still surface its own code/message
+// rather than a generic failure.
+func TestAuthorizeRepository_ErrorCodes(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		status int
+		code   string
+	}{
+		{"InvalidChallenge", http.StatusForbidden, "invalid_challenge"},
+		{"RepositoryAlreadyBound", http.StatusConflict, "repository_already_bound"},
+		{"UpgradeRequired", http.StatusPaymentRequired, "upgrade_required"},
+		{"RateLimited", http.StatusTooManyRequests, "rate_limited"},
+		{"Unauthorized", http.StatusUnauthorized, "unauthorized"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(tc.status)
+				json.NewEncoder(w).Encode(map[string]any{
+					"error": map[string]any{"code": tc.code, "message": "failure: " + tc.code},
+				})
+			}))
+			defer srv.Close()
+
+			client := New(srv.URL, "tok")
+			_, err := client.AuthorizeRepository(context.Background(), "chal_abc")
+			apiErr, ok := err.(*Error)
+			if !ok {
+				t.Fatalf("err is %T, want *apiclient.Error", err)
+			}
+			if apiErr.Code != tc.code {
+				t.Errorf("Code = %q, want %q", apiErr.Code, tc.code)
+			}
+			if apiErr.StatusCode != tc.status {
+				t.Errorf("StatusCode = %d, want %d", apiErr.StatusCode, tc.status)
+			}
+		})
+	}
+}

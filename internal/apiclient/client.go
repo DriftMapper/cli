@@ -1,6 +1,6 @@
-// Package apiclient is a minimal client for the one public-tier operation
-// the MVP CLI ever calls: POST /v1/builds (spec §5.2a). It speaks the
-// {"data"}/{"error"} response envelope documented in
+// Package apiclient is a minimal client for the CLI's public-tier operations
+// (spec §5.2a/§4.5): POST /v1/builds and POST /v1/repositories/authorize. It
+// speaks the {"data"}/{"error"} response envelope documented in
 // driftmapper/protocol's openapi.yaml — protocol's generated types cover
 // the resource shapes but not the envelope itself, so it's unwrapped here.
 package apiclient
@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"slices"
 	"strings"
 
 	"github.com/driftmapper/protocol"
@@ -71,35 +72,69 @@ func (e *Error) Error() string {
 // returned 200 (an identical retry within the same run attempt resolved to
 // an existing build, spec §2.5a) and true on 201.
 func (c *Client) RegisterBuild(ctx context.Context, reg protocol.BuildRegistration) (build protocol.Build, created bool, err error) {
-	body, err := json.Marshal(reg)
-	if err != nil {
-		return protocol.Build{}, false, fmt.Errorf("marshal build registration: %w", err)
-	}
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/v1/builds", bytes.NewReader(body))
+	data, status, err := c.doJSON(ctx, "/v1/builds", reg, http.StatusOK, http.StatusCreated)
 	if err != nil {
 		return protocol.Build{}, false, err
+	}
+	if err := json.Unmarshal(data, &build); err != nil {
+		return protocol.Build{}, false, fmt.Errorf("decode build (status %d): %w", status, err)
+	}
+	return build, status == http.StatusCreated, nil
+}
+
+// AuthorizeRepository calls POST /v1/repositories/authorize (spec §4.5,
+// DRFT-62/DRFT-66) — redeems challenge and, on success, returns confirmation
+// that the token's repository is now bound to an org. challenge is never
+// logged or written to disk by this method; it goes straight into the
+// request body.
+func (c *Client) AuthorizeRepository(ctx context.Context, challenge string) (protocol.RepositoryAuthorization, error) {
+	data, _, err := c.doJSON(ctx, "/v1/repositories/authorize",
+		protocol.RepositoryAuthorizeRequest{Challenge: challenge}, http.StatusCreated)
+	if err != nil {
+		return protocol.RepositoryAuthorization{}, err
+	}
+	var auth protocol.RepositoryAuthorization
+	if err := json.Unmarshal(data, &auth); err != nil {
+		return protocol.RepositoryAuthorization{}, fmt.Errorf("decode repository authorization: %w", err)
+	}
+	return auth, nil
+}
+
+// doJSON POSTs body as JSON to path and unwraps the {"data"}/{"error"}
+// envelope every cmd/api response uses. On any status not in okStatuses, it
+// returns *Error with the server's structured code/message/details; on
+// success it returns the raw `data` field for the caller to unmarshal into
+// its own operation-specific type.
+func (c *Client) doJSON(ctx context.Context, path string, body any, okStatuses ...int) (data json.RawMessage, status int, err error) {
+	reqBody, err := json.Marshal(body)
+	if err != nil {
+		return nil, 0, fmt.Errorf("marshal request: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+path, bytes.NewReader(reqBody))
+	if err != nil {
+		return nil, 0, err
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+c.token)
 
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return protocol.Build{}, false, fmt.Errorf("register build: %w", err)
+		return nil, 0, fmt.Errorf("request %s: %w", path, err)
 	}
 	defer resp.Body.Close()
 
 	raw, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return protocol.Build{}, false, fmt.Errorf("read response: %w", err)
+		return nil, resp.StatusCode, fmt.Errorf("read response: %w", err)
 	}
 
 	var env envelope
 	if err := json.Unmarshal(raw, &env); err != nil {
-		return protocol.Build{}, false, fmt.Errorf("decode response (status %d): %w", resp.StatusCode, err)
+		return nil, resp.StatusCode, fmt.Errorf("decode response (status %d): %w", resp.StatusCode, err)
 	}
 
-	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
+	if !slices.Contains(okStatuses, resp.StatusCode) {
 		apiErr := &Error{StatusCode: resp.StatusCode}
 		if env.Error != nil {
 			apiErr.Code = env.Error.Code
@@ -109,11 +144,8 @@ func (c *Client) RegisterBuild(ctx context.Context, reg protocol.BuildRegistrati
 			apiErr.Code = "unknown"
 			apiErr.Message = fmt.Sprintf("unexpected status %d", resp.StatusCode)
 		}
-		return protocol.Build{}, false, apiErr
+		return nil, resp.StatusCode, apiErr
 	}
 
-	if err := json.Unmarshal(env.Data, &build); err != nil {
-		return protocol.Build{}, false, fmt.Errorf("decode build (status %d): %w", resp.StatusCode, err)
-	}
-	return build, resp.StatusCode == http.StatusCreated, nil
+	return env.Data, resp.StatusCode, nil
 }

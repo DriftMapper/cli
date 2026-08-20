@@ -31,6 +31,28 @@ steps:
   - run: npx @driftmapper/cli
 ```
 
+### Authorizing a new repository
+
+A repository must be bound to a Driftmapper org before its builds are attributed to
+anyone — issue a challenge from the dashboard, add it as a `DRIFTMAPPER_CHALLENGE` repo
+secret, and reference it once:
+
+```yaml
+steps:
+  - run: npx @driftmapper/cli
+    env:
+      DRIFTMAPPER_CHALLENGE: ${{ secrets.DRIFTMAPPER_CHALLENGE }}
+```
+
+No separate command: `driftmapper` redeems the challenge before registering whenever the
+env var is set, and does nothing extra when it's absent. Leaving the secret in place after
+the first successful run is harmless — redeeming an already-consumed challenge from the
+same repository it originally bound succeeds again rather than erroring — but there's no
+reason to keep it around either, so `driftmapper` prints a reminder you can act on when it
+redeems. Running without a repository binding at all works fine too (spec §2.2a) —
+`DRIFTMAPPER_CHALLENGE` only needs to be set for the run that does the binding, whenever
+that happens to be.
+
 ### Comparing two builds
 
 ```bash
@@ -55,6 +77,7 @@ dashboard origin yet.
 | `DRIFTMAPPER_OIDC_AUDIENCE` | `https://driftmapper.com` | `aud` claim requested from the CI provider |
 | `DRIFTMAPPER_BUILD_INFO_FILE` | `build-info.html` | Output path (overridable per-run via `--output`) |
 | `DRIFTMAPPER_DASHBOARD_URL` | — | Dashboard SPA origin `compare` opens (required for `compare`; no default) |
+| `DRIFTMAPPER_CHALLENGE` | — | Single-use repository-authorization value (see "Authorizing a new repository" above); never a flag |
 | `DRIFTMAPPER_BINARY_PATH` | — | Absolute path to a binary the npm launcher should run instead of resolving one |
 
 ## No npm? Download a raw binary

@@ -6,9 +6,11 @@ repository.
 ## What this repo is
 
 `driftmapper/cli` — the CLI that runs inside a customer's CI to register a build with
-Driftmapper (spec §5.2a). Its default action (no subcommand) is **write-only and
-single-action**: acquire a workload OIDC token, `POST /v1/builds`, write `build-info.html`
-from the response.
+Driftmapper (spec §5.2a). Its default action (no subcommand) is **write-only**: acquire a
+workload OIDC token, `POST /v1/builds`, write `build-info.html` from the response. When
+`$DRIFTMAPPER_CHALLENGE` is set (spec §4.5, DRFT-66) it first redeems that challenge — binding
+the repository to an org — before registering; still a write, not a read. See "Gotcha —
+challenge redemption is folded into the default action, not a separate command" below.
 
 `compare` (spec DRFT-50, superseding DRFT-26) is the one other subcommand — a pure browser
 launcher for the SPA compare view (DRFT-29, `driftmapper/static`), with zero network calls of
@@ -37,8 +39,8 @@ reading this while rebuilding it a *third* time: check `git push` actually happe
 ```bash
 go vet ./... && go test ./...
 go build -o bin/driftmapper ./cmd/driftmapper
-./bin/driftmapper compare <build-info-url-a> <build-info-url-b>   # unauth, no server needed to try locally against two files served over HTTP
-DRIFTMAPPER_DASHBOARD_URL=https://... ./bin/driftmapper compare -open <build-info-url-a> <build-info-url-b>   # DRFT-36; -open has no default dashboard origin, see internal/config
+DRIFTMAPPER_DASHBOARD_URL=https://... ./bin/driftmapper compare <build-id-a> <build-id-b>   # DRFT-50; no default dashboard origin, see internal/config
+DRIFTMAPPER_CHALLENGE=... ./bin/driftmapper   # DRFT-66; redeems before registering, see internal/config.Challenge
 
 make check      # everything CI runs: go vet+test, npm unit tests, pack-and-install e2e
 make cross       # cross-compile all six release targets + reproducibility check
@@ -58,8 +60,9 @@ cmd/driftmapper/main.go   entry point; dispatches to `compare` before the defaul
 internal/
   config/                 DRIFTMAPPER_API_URL / DRIFTMAPPER_OIDC_AUDIENCE / build-info
                           path, all zero-config-by-default (spec §5.2a). DashboardURL
-                          (DRIFTMAPPER_DASHBOARD_URL, DRFT-36) is the one exception — no
-                          default, since no dashboard deploy origin is decided yet
+                          (DRIFTMAPPER_DASHBOARD_URL, DRFT-36) and Challenge
+                          (DRIFTMAPPER_CHALLENGE, DRFT-66) are the two exceptions — no
+                          default for either; Challenge is also never a flag (bearer secret)
   oidcclient/             acquires (never verifies) a workload OIDC token — v1 is GitHub
                           Actions only (spec §4.3/§4.4); verification is exclusively
                           server-side (spec §5.2: "must never ship in a binary running on
@@ -73,8 +76,10 @@ internal/
                           click-only sign-in link (DRFT-52): `/login?next=<resolution
                           path>` on resolution_url's own origin, not a server-provided
                           field. No read side as of DRFT-50 — see the compare/ entry below
-  apiclient/               POST /v1/builds client for the {"data"}/{"error"} envelope
-                          (driftmapper/protocol's openapi.yaml)
+  apiclient/               client for the CLI's public-tier operations — POST /v1/builds
+                          and POST /v1/repositories/authorize (DRFT-66) — sharing one
+                          {"data"}/{"error"} envelope-unwrapping helper (doJSON), per
+                          driftmapper/protocol's openapi.yaml
   compare/                 `driftmapper compare`'s URL-building logic (spec DRFT-50) —
                           OpenURL builds the SPA compare view URL from two build-instance
                           IDs the caller already supplied, per that view's own URL
@@ -196,6 +201,32 @@ each target's `build-info.html` (DRFT-52 bakes both `build_instance_id` and `bui
 visible page content precisely so this is a copy-paste, not a curl). There is deliberately no
 `-open` flag (opening the browser is the only mode) and no exit-code-based diff result (the
 CLI itself no longer knows whether the builds match — only the browser does).
+
+## Gotcha — challenge redemption is folded into the default action, not a separate command
+
+DRFT-66's decision record. `driftmapper authorize --challenge=...` as a standalone command
+was the alternative and was rejected: it costs the user a two-stage onboarding (add a step,
+run it, edit the workflow again to remove it), and a command whose only correct lifecycle is
+"run once, then delete" is an odd thing to document and support — every extra edit is a
+drop-off point in the self-serve funnel DRFT-59 restored. Folding into the default action via
+`$DRIFTMAPPER_CHALLENGE` (`maybeAuthorize` in `cmd/driftmapper/main.go`, called before
+`RegisterBuild`) means one CI snippet, added once, never edited.
+
+**`maybeAuthorize` fails loud on every redemption error, on purpose — and relies on the
+server making replay safe, not on guessing at the response.** `RedeemChallenge`
+(`driftmapper/server`'s `internal/store/challenge.go`) deliberately collapses "never
+existed", "expired", "revoked", and "over attempt cap" into one `invalid_challenge` error
+(spec §4.5's anti-enumeration rule) — a first-ever broken challenge must fail loud here,
+matching DRFT-66's acceptance criteria, rather than silently degrading into an unbound,
+rate-limited build that mysteriously fails weeks later. That's also why this CLI never
+special-cases `invalid_challenge` to swallow it: from the response alone, this code cannot
+tell "genuinely broken" apart from "already redeemed by me, harmless." What makes fail-loud
+safe for the harmless case too is server-side, not client-side: DRFT-74 made `RedeemChallenge`
+idempotent for the exact-same-repo replay (an already-redeemed challenge presented again by
+the repository it originally bound succeeds again, rather than erroring), so a
+`DRIFTMAPPER_CHALLENGE` secret left in place after binding doesn't actually break later
+runs — this CLI just doesn't (and shouldn't) know that from here; it relies on the server
+having made it true.
 
 ## The `protocol` dependency is public for a reason
 

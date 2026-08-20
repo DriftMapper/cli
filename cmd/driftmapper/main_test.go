@@ -3,10 +3,16 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"strings"
 	"testing"
+
+	"github.com/driftmapper/cli/internal/apiclient"
+	"github.com/driftmapper/protocol"
 )
 
 // stubBrowserOpen replaces browserOpen for the duration of the test,
@@ -124,5 +130,84 @@ func TestRunCompare_RequiresTwoArgs(t *testing.T) {
 
 	if code != 2 {
 		t.Errorf("exit code = %d, want 2 (usage error)", code)
+	}
+}
+
+// authorizeServer stubs POST /v1/repositories/authorize, returning status/
+// body for every request regardless of the challenge value presented.
+func authorizeServer(t *testing.T, status int, body map[string]any) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(status)
+		json.NewEncoder(w).Encode(body)
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+func TestMaybeAuthorize_NoOpWhenChallengeEmpty(t *testing.T) {
+	// No server at all — a request here would fail to connect and this test
+	// would fail, proving the empty-challenge path makes no network call.
+	client := apiclient.New("http://127.0.0.1:0", "tok")
+
+	var stdout bytes.Buffer
+	if err := maybeAuthorize(context.Background(), &stdout, client, ""); err != nil {
+		t.Fatalf("maybeAuthorize: %v", err)
+	}
+	if stdout.Len() != 0 {
+		t.Errorf("stdout = %q, want empty (no-op)", stdout.String())
+	}
+}
+
+func TestMaybeAuthorize_SuccessPrintsRemovalReminder(t *testing.T) {
+	srv := authorizeServer(t, http.StatusCreated, map[string]any{
+		"data": protocol.RepositoryAuthorization{RepositoryId: "repo1", OrganizationId: "org1"},
+	})
+	client := apiclient.New(srv.URL, "tok")
+
+	var stdout bytes.Buffer
+	if err := maybeAuthorize(context.Background(), &stdout, client, "chal_abc"); err != nil {
+		t.Fatalf("maybeAuthorize: %v", err)
+	}
+	out := stdout.String()
+	if !strings.Contains(out, "repo1") || !strings.Contains(out, "org1") {
+		t.Errorf("stdout = %q, want it to mention repo1 and org1", out)
+	}
+	if !strings.Contains(out, "DRIFTMAPPER_CHALLENGE") {
+		t.Errorf("stdout = %q, want a reminder to remove DRIFTMAPPER_CHALLENGE", out)
+	}
+}
+
+func TestMaybeAuthorize_FailsLoudOnInvalidChallenge(t *testing.T) {
+	srv := authorizeServer(t, http.StatusForbidden, map[string]any{
+		"error": map[string]any{"code": "invalid_challenge", "message": "Invalid or expired challenge."},
+	})
+	client := apiclient.New(srv.URL, "tok")
+
+	var stdout bytes.Buffer
+	err := maybeAuthorize(context.Background(), &stdout, client, "chal_abc")
+	if err == nil {
+		t.Fatal("maybeAuthorize: want error, got nil")
+	}
+	if !strings.Contains(err.Error(), "authorize repository") || !strings.Contains(err.Error(), "invalid_challenge") {
+		t.Errorf("err = %q, want it to mention both \"authorize repository\" and \"invalid_challenge\"", err.Error())
+	}
+	if stdout.Len() != 0 {
+		t.Errorf("stdout = %q, want empty on failure (no removal reminder)", stdout.String())
+	}
+}
+
+func TestMaybeAuthorize_FailsLoudOnRepositoryAlreadyBound(t *testing.T) {
+	srv := authorizeServer(t, http.StatusConflict, map[string]any{
+		"error": map[string]any{"code": "repository_already_bound", "message": "This repository is already bound to a different organization."},
+	})
+	client := apiclient.New(srv.URL, "tok")
+
+	err := maybeAuthorize(context.Background(), &bytes.Buffer{}, client, "chal_abc")
+	if err == nil {
+		t.Fatal("maybeAuthorize: want error, got nil")
+	}
+	if !strings.Contains(err.Error(), "repository_already_bound") {
+		t.Errorf("err = %q, want it to mention repository_already_bound", err.Error())
 	}
 }
