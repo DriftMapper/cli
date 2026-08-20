@@ -13,9 +13,11 @@ import (
 	htmlpkg "html"
 	"html/template"
 	"io"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
+	"time"
 
 	"github.com/driftmapper/protocol"
 )
@@ -25,29 +27,37 @@ import (
 // a public contract, same N-2-style compatibility posture as the wire
 // protocol. A new driftmapper:* meta tag is additive, not a bump, matching
 // this codebase's "clients must tolerate unknown fields" posture elsewhere
-// (protocol/openapi.yaml's compatibility policy) — resolution-url below was
-// added on that basis.
+// (protocol/openapi.yaml's compatibility policy) — resolution-url and
+// built-at below were both added on that basis.
 const schemaVersion = "1"
 
-// tmpl renders all three representations — the namespaced meta tags, the
-// auto-redirect script, and the noscript fallback link — from one
-// (buildInstanceID, resolutionURL) pair, so they can never disagree with
-// each other. html/template's contextual autoescaping is what makes reusing
-// ResolutionURL safe across both the <script> and href contexts below: each
-// occurrence is escaped for the context it actually appears in.
+// tmpl renders all representations — the namespaced meta tags, the visible
+// unauth-tier content, and the click-only login link (DRFT-52) — from one
+// templateData value, so they can never disagree with each other.
+// html/template's contextual autoescaping is what makes reusing LoginURL
+// safe across both href occurrences below.
+//
+// Deliberately no auto-redirect script (DRFT-52 removed it): a visitor sees
+// this file's own content — the same build_instance_id/built_at the
+// resolution page's unauth tier would show (spec §2.7, DRFT-40's disclosure
+// boundary) — before ever being asked to sign in. The login link fires only
+// on click, matching FORMAT-build-info.md's "human-facing ... free to
+// change shape without a version bump" layer.
 var tmpl = template.Must(template.New("build-info").Parse(`<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="driftmapper:schema-version" content="{{.SchemaVersion}}">
 <meta name="driftmapper:build-id" content="{{.BuildInstanceID}}">
+<meta name="driftmapper:built-at" content="{{.BuiltAt}}">
 <meta name="driftmapper:resolution-url" content="{{.ResolutionURL}}">
 <title>Driftmapper build info</title>
-<script>window.location.replace({{.ResolutionURL}});</script>
 </head>
 <body>
-<p><a href="{{.ResolutionURL}}">View this build on Driftmapper</a></p>
-<noscript><a href="{{.ResolutionURL}}">View this build on Driftmapper</a></noscript>
+<p>Build ID: {{.BuildInstanceID}}</p>
+<p>Built at: {{.BuiltAt}}</p>
+<p><a href="{{.LoginURL}}">View full build details</a></p>
+<noscript><a href="{{.LoginURL}}">View full build details</a></noscript>
 </body>
 </html>
 `))
@@ -55,7 +65,9 @@ var tmpl = template.Must(template.New("build-info").Parse(`<!doctype html>
 type templateData struct {
 	SchemaVersion   string
 	BuildInstanceID string
+	BuiltAt         string
 	ResolutionURL   string
+	LoginURL        string
 }
 
 // Generate writes outputPath atomically (write-to-temp-then-rename in the
@@ -66,6 +78,11 @@ func Generate(outputPath string, build protocol.Build) error {
 	}
 	if build.ResolutionUrl == nil || *build.ResolutionUrl == "" {
 		return fmt.Errorf("resolution_url is empty")
+	}
+
+	login, err := loginURL(*build.ResolutionUrl)
+	if err != nil {
+		return fmt.Errorf("build login URL: %w", err)
 	}
 
 	dir := filepath.Dir(outputPath)
@@ -82,7 +99,9 @@ func Generate(outputPath string, build protocol.Build) error {
 	data := templateData{
 		SchemaVersion:   schemaVersion,
 		BuildInstanceID: build.BuildInstanceId,
+		BuiltAt:         build.BuiltAt.UTC().Format(time.RFC3339),
 		ResolutionURL:   *build.ResolutionUrl,
+		LoginURL:        login,
 	}
 	if err := tmpl.Execute(tmp, data); err != nil {
 		tmp.Close()
@@ -95,6 +114,29 @@ func Generate(outputPath string, build protocol.Build) error {
 		return fmt.Errorf("rename into place: %w", err)
 	}
 	return nil
+}
+
+// loginURL derives `/login?next=<path>` on resolutionURL's own origin
+// (spec DRFT-52): the human link skips straight past the resolution page's
+// unauth tier — this file already shows everything that tier would — and
+// lands on sign-in with the resolution path queued up to redirect back to
+// afterward. `next` (not `returnTo`) matches cmd/web/internal/handler/
+// auth.go's actual query param name.
+func loginURL(resolutionURL string) (string, error) {
+	u, err := url.Parse(resolutionURL)
+	if err != nil {
+		return "", fmt.Errorf("parse resolution_url: %w", err)
+	}
+	next := u.Path
+	if u.RawQuery != "" {
+		next += "?" + u.RawQuery
+	}
+	login := *u
+	login.Path = "/login"
+	q := url.Values{}
+	q.Set("next", next)
+	login.RawQuery = q.Encode()
+	return login.String(), nil
 }
 
 // metaTagPattern matches exactly the driftmapper:* meta tags Generate

@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/driftmapper/protocol"
 )
@@ -72,11 +73,12 @@ func fixtureBuild(t *testing.T) protocol.Build {
 	resolutionURL := "https://driftmapper.test/r/abc123"
 	return protocol.Build{
 		BuildInstanceId: "abc123",
+		BuiltAt:         time.Date(2026, 1, 2, 15, 4, 5, 0, time.UTC),
 		ResolutionUrl:   &resolutionURL,
 	}
 }
 
-func TestGenerate_WritesAllThreeRepresentations(t *testing.T) {
+func TestGenerate_WritesExpectedContent(t *testing.T) {
 	dir := t.TempDir()
 	out := filepath.Join(dir, "build-info.html")
 
@@ -93,14 +95,19 @@ func TestGenerate_WritesAllThreeRepresentations(t *testing.T) {
 	for _, want := range []string{
 		`<meta name="driftmapper:schema-version" content="1">`,
 		`<meta name="driftmapper:build-id" content="abc123">`,
+		`<meta name="driftmapper:built-at" content="2026-01-02T15:04:05Z">`,
 		`<meta name="driftmapper:resolution-url" content="https://driftmapper.test/r/abc123">`,
-		`window.location.replace("https://driftmapper.test/r/abc123")`,
-		`<a href="https://driftmapper.test/r/abc123">`,
-		`<noscript>`,
+		`Build ID: abc123`,
+		`Built at: 2026-01-02T15:04:05Z`,
+		`<a href="https://driftmapper.test/login?next=%2Fr%2Fabc123">`,
+		`<noscript><a href="https://driftmapper.test/login?next=%2Fr%2Fabc123">`,
 	} {
 		if !strings.Contains(html, want) {
 			t.Errorf("output missing %q\nfull output:\n%s", want, html)
 		}
+	}
+	if strings.Contains(html, "<script>") {
+		t.Errorf("output must not auto-redirect on load, found a <script> tag:\n%s", html)
 	}
 }
 
