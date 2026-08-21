@@ -2,8 +2,9 @@
 
 The Driftmapper CLI: registers a build from inside your CI so Driftmapper can track it.
 The default action is write-only — it acquires a workload OIDC token, calls `POST
-/v1/builds`, and writes `build-info.html`. `compare` (below) is the one other command, and it
-makes zero network calls of its own — it's a browser launcher, not a read command.
+/v1/builds`, and writes `build-info.html`. Two other subcommands: `deploy` (below) records
+that a registered build is now deployed to an environment, using the same OIDC token; `compare`
+(below) is a browser launcher with zero network calls of its own, not a read command.
 
 ## Install and use
 
@@ -68,6 +69,61 @@ be launched (headless/SSH), the URL is printed to stdout instead so it's still u
 
 `compare` makes no network calls and requires `DRIFTMAPPER_DASHBOARD_URL` — there's no default
 dashboard origin yet.
+
+### Marking a deploy
+
+```yaml
+permissions:
+  id-token: write   # required — same OIDC token as registration
+steps:
+  - run: npx @driftmapper/cli deploy -env=production
+```
+
+`-commit` defaults to `$GITHUB_SHA`, so the common case needs nothing else — the server
+resolves whichever registered build was produced from that commit. Set `-commit` explicitly
+when the deploy workflow's own `$GITHUB_SHA` isn't the commit that was actually built — a
+tag- or manually-dispatched deploy workflow is the usual case where that happens.
+
+This matters most for a Docker/image-based deploy, where the build and deploy steps are
+often two separate workflow runs and the build's opaque build-instance ID has no way to
+reach the deploy job (it lives inside `build-info.html`, which is either sealed in a layer
+the deploy job never unpacks or was written by a workflow run this one has no access to) —
+but every deploy topology already knows the commit it's shipping:
+
+```yaml
+# .github/workflows/deploy.yml — a separate workflow from the one that builds the image
+on:
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        required: true
+permissions:
+  id-token: write
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - run: kubectl set image deployment/web web=myregistry/web:${{ inputs.image_tag }}
+      - run: npx @driftmapper/cli deploy -env=production -commit=${{ inputs.image_tag }}
+```
+
+(Here `image_tag` is assumed to be the commit SHA the image was built from — adjust to
+however your build tags images if that's not the case.)
+
+It's a second, explicit CI step on purpose — a deploy happens every time you deploy, not
+once like a repository binding, so it isn't folded into the default action the way
+`DRIFTMAPPER_CHALLENGE` redemption is. Rerunning the same CI run (a retried step after a
+network failure) is a harmless no-op; a genuinely later run for the same build/environment —
+a real roll-forward — always records as a new entry. Add `-best-effort` if you'd rather warn
+and continue (exit 0) than fail the whole deploy job when Driftmapper itself is unreachable:
+
+```yaml
+  - run: npx @driftmapper/cli deploy -env=production -best-effort
+```
+
+If you'd rather not integrate this into CI at all, an org admin/owner can mark a deploy
+manually from that build's resolution page in the dashboard instead — a fallback path that
+doesn't require any CI changes.
 
 ### Environment variables
 

@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/driftmapper/protocol"
 )
@@ -125,6 +126,201 @@ func TestRegisterBuild_UnknownFieldRejection(t *testing.T) {
 	}
 	if apiErr.StatusCode != http.StatusBadRequest {
 		t.Errorf("StatusCode = %d, want %d", apiErr.StatusCode, http.StatusBadRequest)
+	}
+}
+
+// withFastDeployRetries shrinks deployRetryBackoff to near-zero for the
+// duration of a test, so exercising the retry path doesn't cost real
+// wall-clock seconds. Restores the real schedule via t.Cleanup.
+func withFastDeployRetries(t *testing.T) {
+	t.Helper()
+	orig := deployRetryBackoff
+	deployRetryBackoff = []time.Duration{time.Millisecond, time.Millisecond, time.Millisecond}
+	t.Cleanup(func() { deployRetryBackoff = orig })
+}
+
+func TestRecordDeployment_Success(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.URL.Path; got != "/v1/deployments" {
+			t.Errorf("path = %q, want /v1/deployments", got)
+		}
+		if got := r.Header.Get("Authorization"); got != "Bearer tok" {
+			t.Errorf("Authorization = %q, want %q", got, "Bearer tok")
+		}
+		var body protocol.DeploymentRequest
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatalf("decode request body: %v", err)
+		}
+		if body.CommitSha != "abc1234" || body.Environment != "production" {
+			t.Errorf("request = %+v, want commit_sha=abc1234 environment=production", body)
+		}
+
+		w.WriteHeader(http.StatusCreated)
+		json.NewEncoder(w).Encode(map[string]any{
+			"data": protocol.Deployment{BuildInstanceId: "build1", Environment: "production"},
+		})
+	}))
+	defer srv.Close()
+
+	client := New(srv.URL, "tok")
+	deployment, created, err := client.RecordDeployment(context.Background(), "abc1234", "production")
+	if err != nil {
+		t.Fatalf("RecordDeployment: %v", err)
+	}
+	if !created {
+		t.Error("created = false, want true (201)")
+	}
+	if deployment.BuildInstanceId != "build1" || deployment.Environment != "production" {
+		t.Errorf("deployment = %+v, want build_instance_id=build1 environment=production", deployment)
+	}
+}
+
+func TestRecordDeployment_IdempotentRetryReturns200NotCreated(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		json.NewEncoder(w).Encode(map[string]any{
+			"data": protocol.Deployment{BuildInstanceId: "build1", Environment: "production"},
+		})
+	}))
+	defer srv.Close()
+
+	client := New(srv.URL, "tok")
+	_, created, err := client.RecordDeployment(context.Background(), "abc1234", "production")
+	if err != nil {
+		t.Fatalf("RecordDeployment: %v", err)
+	}
+	if created {
+		t.Error("created = true, want false (200 retry)")
+	}
+}
+
+// TestRecordDeployment_ErrorCodes covers each distinct failure mode
+// documented for recordDeployment (openapi.yaml) — deployError in
+// cmd/driftmapper only special-cases no_live_policy and not_found, but
+// every code must still surface its own code/message rather than a
+// generic failure. All of these are permanent 4xx codes — a single
+// request each, no retry.
+func TestRecordDeployment_ErrorCodes(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		status int
+		code   string
+	}{
+		{"NoLivePolicy", http.StatusForbidden, "no_live_policy"},
+		{"PolicyRevoked", http.StatusForbidden, "policy_revoked"},
+		{"ClaimMismatch", http.StatusForbidden, "claim_mismatch"},
+		{"InvalidEnvironment", http.StatusUnprocessableEntity, "validation"},
+		{"NotFound", http.StatusNotFound, "not_found"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var requests int
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				requests++
+				w.WriteHeader(tc.status)
+				json.NewEncoder(w).Encode(map[string]any{
+					"error": map[string]any{"code": tc.code, "message": "failure: " + tc.code},
+				})
+			}))
+			defer srv.Close()
+
+			client := New(srv.URL, "tok")
+			_, _, err := client.RecordDeployment(context.Background(), "abc1234", "production")
+			apiErr, ok := err.(*Error)
+			if !ok {
+				t.Fatalf("err is %T, want *apiclient.Error", err)
+			}
+			if apiErr.Code != tc.code {
+				t.Errorf("Code = %q, want %q", apiErr.Code, tc.code)
+			}
+			if apiErr.StatusCode != tc.status {
+				t.Errorf("StatusCode = %d, want %d", apiErr.StatusCode, tc.status)
+			}
+			if requests != 1 {
+				t.Errorf("requests = %d, want 1 (a permanent 4xx must not be retried)", requests)
+			}
+		})
+	}
+}
+
+// TestRecordDeployment_RetriesOn5xxThenSucceeds and
+// TestRecordDeployment_RetriesOn429ThenSucceeds cover isTransient's two
+// retryable cases. TestRecordDeployment_GivesUpAfterExhaustingRetries
+// confirms the schedule is bounded, not infinite.
+func TestRecordDeployment_RetriesOn5xxThenSucceeds(t *testing.T) {
+	withFastDeployRetries(t)
+	var requests int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		if requests < 3 {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			json.NewEncoder(w).Encode(map[string]any{"error": map[string]any{"code": "unavailable", "message": "try again"}})
+			return
+		}
+		w.WriteHeader(http.StatusCreated)
+		json.NewEncoder(w).Encode(map[string]any{
+			"data": protocol.Deployment{BuildInstanceId: "build1", Environment: "production"},
+		})
+	}))
+	defer srv.Close()
+
+	client := New(srv.URL, "tok")
+	_, created, err := client.RecordDeployment(context.Background(), "abc1234", "production")
+	if err != nil {
+		t.Fatalf("RecordDeployment: %v", err)
+	}
+	if !created {
+		t.Error("created = false, want true")
+	}
+	if requests != 3 {
+		t.Errorf("requests = %d, want 3 (two 503s then a 201)", requests)
+	}
+}
+
+func TestRecordDeployment_RetriesOn429ThenSucceeds(t *testing.T) {
+	withFastDeployRetries(t)
+	var requests int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		if requests < 2 {
+			w.WriteHeader(http.StatusTooManyRequests)
+			json.NewEncoder(w).Encode(map[string]any{"error": map[string]any{"code": "rate_limited", "message": "slow down"}})
+			return
+		}
+		w.WriteHeader(http.StatusCreated)
+		json.NewEncoder(w).Encode(map[string]any{
+			"data": protocol.Deployment{BuildInstanceId: "build1", Environment: "production"},
+		})
+	}))
+	defer srv.Close()
+
+	client := New(srv.URL, "tok")
+	_, _, err := client.RecordDeployment(context.Background(), "abc1234", "production")
+	if err != nil {
+		t.Fatalf("RecordDeployment: %v", err)
+	}
+	if requests != 2 {
+		t.Errorf("requests = %d, want 2 (one 429 then a 201)", requests)
+	}
+}
+
+func TestRecordDeployment_GivesUpAfterExhaustingRetries(t *testing.T) {
+	withFastDeployRetries(t)
+	var requests int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		w.WriteHeader(http.StatusServiceUnavailable)
+		json.NewEncoder(w).Encode(map[string]any{"error": map[string]any{"code": "unavailable", "message": "try again"}})
+	}))
+	defer srv.Close()
+
+	client := New(srv.URL, "tok")
+	_, _, err := client.RecordDeployment(context.Background(), "abc1234", "production")
+	if err == nil {
+		t.Fatal("RecordDeployment: want error after exhausting retries, got nil")
+	}
+	wantRequests := len(deployRetryBackoff) + 1 // the initial attempt, plus every retry
+	if requests != wantRequests {
+		t.Errorf("requests = %d, want %d (bounded, not infinite)", requests, wantRequests)
 	}
 }
 
