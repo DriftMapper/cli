@@ -197,6 +197,33 @@ func TestMaybeAuthorize_FailsLoudOnInvalidChallenge(t *testing.T) {
 	}
 }
 
+func TestRegisterBuildError_NoLivePolicyGetsActionableGuidance(t *testing.T) {
+	apiErr := &apiclient.Error{StatusCode: http.StatusForbidden, Code: "no_live_policy", Message: "This repository has no live trusted-workload policy."}
+	err := registerBuildError(apiErr)
+	if err == nil {
+		t.Fatal("registerBuildError: want error, got nil")
+	}
+	for _, want := range []string{"register build", apiErr.Message, "Add a repository", "DRIFTMAPPER_CHALLENGE"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("err = %q, want it to contain %q", err.Error(), want)
+		}
+	}
+}
+
+func TestRegisterBuildError_OtherCodesWrapGenerically(t *testing.T) {
+	apiErr := &apiclient.Error{StatusCode: http.StatusForbidden, Code: "policy_revoked", Message: "The trusted-workload policy for this repository was revoked."}
+	err := registerBuildError(apiErr)
+	if err == nil {
+		t.Fatal("registerBuildError: want error, got nil")
+	}
+	if !strings.Contains(err.Error(), "register build") || !strings.Contains(err.Error(), "policy_revoked") {
+		t.Errorf("err = %q, want it to mention both \"register build\" and \"policy_revoked\"", err.Error())
+	}
+	if strings.Contains(err.Error(), "DRIFTMAPPER_CHALLENGE") {
+		t.Errorf("err = %q, want no challenge guidance for a non-no_live_policy error", err.Error())
+	}
+}
+
 func TestMaybeAuthorize_FailsLoudOnRepositoryAlreadyBound(t *testing.T) {
 	srv := authorizeServer(t, http.StatusConflict, map[string]any{
 		"error": map[string]any{"code": "repository_already_bound", "message": "This repository is already bound to a different organization."},
