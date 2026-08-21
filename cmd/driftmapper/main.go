@@ -20,6 +20,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -99,7 +100,7 @@ func run(ctx context.Context, output string) error {
 
 	build, created, err := client.RegisterBuild(ctx, reg)
 	if err != nil {
-		return fmt.Errorf("register build: %w", err)
+		return registerBuildError(err)
 	}
 
 	if output == "" {
@@ -115,6 +116,22 @@ func run(ctx context.Context, output string) error {
 	}
 	fmt.Printf("%s build %s -> %s\n", verb, build.BuildInstanceId, output)
 	return nil
+}
+
+// registerBuildError wraps a RegisterBuild failure. DRFT-80: registration
+// now requires a live trusted-workload policy, so a repository that was
+// never authorized (or whose DRIFTMAPPER_CHALLENGE never ran) hits this
+// case on every build until it is. Every other error wraps generically,
+// unchanged from before — only no_live_policy gets actionable guidance,
+// phrased in the dashboard's own vocabulary ("Add a repository" /
+// "Authorize a repository" — it never surfaces the word "challenge" to
+// users, so this message doesn't either.
+func registerBuildError(err error) error {
+	var apiErr *apiclient.Error
+	if errors.As(err, &apiErr) && apiErr.Code == "no_live_policy" {
+		return fmt.Errorf("register build: %s — add this repository from the dashboard (\"Add a repository\") and set DRIFTMAPPER_CHALLENGE, then re-run", apiErr.Message)
+	}
+	return fmt.Errorf("register build: %w", err)
 }
 
 // maybeAuthorize redeems challenge via client.AuthorizeRepository when set,
