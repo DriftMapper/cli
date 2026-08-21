@@ -15,6 +15,11 @@
 // the default action's own flag.Parse() ever runs — see runCompare and
 // internal/compare's doc comment for why it performs no network calls of
 // its own.
+//
+// `deploy` (spec's deploy-marking design, DRFT-81/82/88) is a second write
+// subcommand, dispatched the same way: acquire a workload OIDC token and
+// call RecordDeployment. Deliberately a separate, explicit CI step from the
+// default action rather than folded in — see runDeploy's doc comment.
 package main
 
 import (
@@ -57,6 +62,9 @@ func main() {
 	// are all single-token and never equal to a bare subcommand name.
 	if len(os.Args) > 1 && os.Args[1] == "compare" {
 		os.Exit(runCompare(context.Background(), os.Args[2:], os.Stdout, os.Stderr))
+	}
+	if len(os.Args) > 1 && os.Args[1] == "deploy" {
+		os.Exit(runDeploy(context.Background(), os.Args[2:], os.Stdout, os.Stderr))
 	}
 
 	output := flag.String("output", "", "path to write build-info.html (default: $DRIFTMAPPER_BUILD_INFO_FILE, or build-info.html)")
@@ -217,4 +225,108 @@ func runCompare(ctx context.Context, args []string, stdout, stderr io.Writer) in
 		fmt.Fprintln(stderr, "driftmapper: could not open browser automatically:", err)
 	}
 	return 0
+}
+
+// runDeploy implements `driftmapper deploy -env=<name> [-commit=<sha>]
+// [-best-effort]` (spec's deploy-marking design, DRFT-81/82/88/92):
+// acquires a workload OIDC token the same way the default action does —
+// this is a CI-originated write, same trust model as register — and calls
+// RecordDeployment, which resolves -commit to the build the server
+// registered for it (DRFT-92: the opaque build_instance_id generally can't
+// reach a deploy step, but the commit always can).
+//
+// Deliberately a second, explicit CI step rather than folded into register
+// the way challenge redemption was (DRFT-66's own decision record): that
+// precedent doesn't apply here, since a deploy event happens on every real
+// deploy, not once per repository. There is also, deliberately, no
+// auto-invocation of deploy from the default action — someone has to add a
+// second CI step that actually fires it (DRFT-81's named friction).
+//
+// -best-effort turns a failure into a warning on stderr and exit 0 instead
+// of the default exit 1 — for a deploy pipeline that would rather ship and
+// lose a drift-detection data point than fail the whole job over a
+// Driftmapper outage. Unset (the default) treats a failed deploy record as
+// a real failure, on the theory that most callers do want to know.
+func runDeploy(ctx context.Context, args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("deploy", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	env := fs.String("env", "", "environment this build was deployed to, e.g. production (required)")
+	commit := fs.String("commit", os.Getenv("GITHUB_SHA"), "commit being deployed (default: $GITHUB_SHA — set explicitly when the deploy workflow's $GITHUB_SHA isn't the built commit, e.g. a tag- or dispatch-triggered deploy)")
+	bestEffort := fs.Bool("best-effort", false, "on failure, warn on stderr and exit 0 instead of exiting 1")
+	fs.Usage = func() {
+		fmt.Fprintln(stderr, "usage: driftmapper deploy -env=<name> [-commit=<sha>] [-best-effort]")
+		fs.PrintDefaults()
+	}
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if fs.NArg() != 0 || *env == "" || *commit == "" {
+		fs.Usage()
+		return 2
+	}
+
+	if err := doDeploy(ctx, stdout, *commit, *env); err != nil {
+		if *bestEffort {
+			fmt.Fprintln(stderr, "driftmapper: (best-effort, continuing) "+err.Error())
+			return 0
+		}
+		fmt.Fprintln(stderr, "driftmapper:", err)
+		return 1
+	}
+	return 0
+}
+
+// doDeploy acquires an OIDC token and calls recordDeployment — split out of
+// runDeploy so -best-effort's exit-0-on-failure applies uniformly to every
+// failure mode (OIDC acquisition included), not just a RecordDeployment
+// error.
+func doDeploy(ctx context.Context, stdout io.Writer, commitSHA, environment string) error {
+	token, err := oidcclient.AcquireGitHubActionsToken(ctx, config.OIDCAudience())
+	if err != nil {
+		return fmt.Errorf("acquire OIDC token: %w", err)
+	}
+
+	client := apiclient.New(config.APIURL(), token)
+	return recordDeployment(ctx, stdout, client, commitSHA, environment)
+}
+
+// recordDeployment calls RecordDeployment and prints a confirmation to w,
+// matching run()'s own "%s build %s -> %s\n" style rather than inventing a
+// new output convention for a second write command. It names the
+// build_instance_id commit resolved to, so that resolution is visible in
+// the CI log even though the caller only ever passed a commit.
+func recordDeployment(ctx context.Context, w io.Writer, client *apiclient.Client, commitSHA, environment string) error {
+	deployment, created, err := client.RecordDeployment(ctx, commitSHA, environment)
+	if err != nil {
+		return deployError(err)
+	}
+	verb := "Recorded"
+	if !created {
+		verb = "Already recorded (idempotent retry)"
+	}
+	fmt.Fprintf(w, "%s build %s -> deployed to %s\n", verb, deployment.BuildInstanceId, deployment.Environment)
+	return nil
+}
+
+// deployError wraps a RecordDeployment failure. Mirrors registerBuildError's
+// shape: no_live_policy gets the same actionable dashboard guidance register
+// itself reports for the same reason. not_found is new here — a commit
+// with no registered build under this repository's token, the likely
+// first-run mistake (deploying a commit whose build step never ran, or ran
+// against a different repository token) — and gets its own actionable
+// message rather than wrapping generically. Every other code DRFT-92
+// documents (validation on a malformed environment name, claim_mismatch)
+// wraps generically, since the server's own message is already specific
+// enough to act on.
+func deployError(err error) error {
+	var apiErr *apiclient.Error
+	if errors.As(err, &apiErr) {
+		switch apiErr.Code {
+		case "no_live_policy":
+			return fmt.Errorf("record deployment: %s — add this repository from the dashboard (\"Add a repository\") and set DRIFTMAPPER_CHALLENGE, then re-run register", apiErr.Message)
+		case "not_found":
+			return fmt.Errorf("record deployment: %s — no build is registered for this commit under this repository; did the build step run first, against the same repository token?", apiErr.Message)
+		}
+	}
+	return fmt.Errorf("record deployment: %w", err)
 }

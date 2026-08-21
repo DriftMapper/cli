@@ -224,6 +224,177 @@ func TestRegisterBuildError_OtherCodesWrapGenerically(t *testing.T) {
 	}
 }
 
+// deploymentServer stubs POST /v1/deployments, returning status/body for
+// every request regardless of the payload presented.
+func deploymentServer(t *testing.T, status int, body map[string]any) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(status)
+		json.NewEncoder(w).Encode(body)
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+func TestRecordDeployment_SuccessPrintsConfirmation(t *testing.T) {
+	srv := deploymentServer(t, http.StatusCreated, map[string]any{
+		"data": protocol.Deployment{BuildInstanceId: "build1", Environment: "production"},
+	})
+	client := apiclient.New(srv.URL, "tok")
+
+	var stdout bytes.Buffer
+	if err := recordDeployment(context.Background(), &stdout, client, "abc1234", "production"); err != nil {
+		t.Fatalf("recordDeployment: %v", err)
+	}
+	out := stdout.String()
+	if !strings.Contains(out, "Recorded") || !strings.Contains(out, "build1") || !strings.Contains(out, "production") {
+		t.Errorf("stdout = %q, want it to mention Recorded, build1, and production", out)
+	}
+}
+
+func TestRecordDeployment_IdempotentRetryPrintsDistinctVerb(t *testing.T) {
+	srv := deploymentServer(t, http.StatusOK, map[string]any{
+		"data": protocol.Deployment{BuildInstanceId: "build1", Environment: "production"},
+	})
+	client := apiclient.New(srv.URL, "tok")
+
+	var stdout bytes.Buffer
+	if err := recordDeployment(context.Background(), &stdout, client, "abc1234", "production"); err != nil {
+		t.Fatalf("recordDeployment: %v", err)
+	}
+	if !strings.Contains(stdout.String(), "Already recorded") {
+		t.Errorf("stdout = %q, want it to mention \"Already recorded\"", stdout.String())
+	}
+}
+
+func TestRecordDeployment_FailsLoudOnError(t *testing.T) {
+	srv := deploymentServer(t, http.StatusUnprocessableEntity, map[string]any{
+		"error": map[string]any{"code": "validation", "message": "environment must be 1-63 characters..."},
+	})
+	client := apiclient.New(srv.URL, "tok")
+
+	var stdout bytes.Buffer
+	err := recordDeployment(context.Background(), &stdout, client, "abc1234", "Not Valid")
+	if err == nil {
+		t.Fatal("recordDeployment: want error, got nil")
+	}
+	if stdout.Len() != 0 {
+		t.Errorf("stdout = %q, want empty on failure", stdout.String())
+	}
+}
+
+func TestDeployError_NoLivePolicyGetsActionableGuidance(t *testing.T) {
+	apiErr := &apiclient.Error{StatusCode: http.StatusForbidden, Code: "no_live_policy", Message: "This repository has no live trusted-workload policy."}
+	err := deployError(apiErr)
+	if err == nil {
+		t.Fatal("deployError: want error, got nil")
+	}
+	for _, want := range []string{"record deployment", apiErr.Message, "Add a repository", "DRIFTMAPPER_CHALLENGE"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("err = %q, want it to contain %q", err.Error(), want)
+		}
+	}
+}
+
+func TestDeployError_NotFoundGetsActionableGuidance(t *testing.T) {
+	apiErr := &apiclient.Error{StatusCode: http.StatusNotFound, Code: "not_found", Message: "No build is registered for this commit."}
+	err := deployError(apiErr)
+	if err == nil {
+		t.Fatal("deployError: want error, got nil")
+	}
+	for _, want := range []string{"record deployment", apiErr.Message, "no build is registered"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("err = %q, want it to contain %q", err.Error(), want)
+		}
+	}
+}
+
+func TestDeployError_OtherCodesWrapGenerically(t *testing.T) {
+	apiErr := &apiclient.Error{StatusCode: http.StatusForbidden, Code: "claim_mismatch", Message: "claim mismatch on workflow"}
+	err := deployError(apiErr)
+	if err == nil {
+		t.Fatal("deployError: want error, got nil")
+	}
+	if !strings.Contains(err.Error(), "record deployment") || !strings.Contains(err.Error(), "claim_mismatch") {
+		t.Errorf("err = %q, want it to mention both \"record deployment\" and \"claim_mismatch\"", err.Error())
+	}
+	if strings.Contains(err.Error(), "DRIFTMAPPER_CHALLENGE") {
+		t.Errorf("err = %q, want no challenge guidance for a non-no_live_policy error", err.Error())
+	}
+}
+
+func TestRunDeploy_RequiresEnvFlag(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := runDeploy(context.Background(), []string{"-commit", "abc1234"}, &stdout, &stderr)
+	if code != 2 {
+		t.Errorf("exit code = %d, want 2 (usage error)", code)
+	}
+}
+
+func TestRunDeploy_RequiresCommit(t *testing.T) {
+	t.Setenv("GITHUB_SHA", "") // no -commit flag and no fallback env var
+
+	var stdout, stderr bytes.Buffer
+	code := runDeploy(context.Background(), []string{"-env", "production"}, &stdout, &stderr)
+	if code != 2 {
+		t.Errorf("exit code = %d, want 2 (usage error)", code)
+	}
+}
+
+func TestRunDeploy_CommitDefaultsToGitHubSHA(t *testing.T) {
+	t.Setenv("GITHUB_SHA", "abc1234")
+	t.Setenv("ACTIONS_ID_TOKEN_REQUEST_URL", "")
+	t.Setenv("ACTIONS_ID_TOKEN_REQUEST_TOKEN", "")
+
+	var stdout, stderr bytes.Buffer
+	// -commit is unset, but $GITHUB_SHA satisfies the requiredness check —
+	// reaching the OIDC step (and failing there) proves the flag default
+	// resolved, rather than the usage error firing first.
+	code := runDeploy(context.Background(), []string{"-env", "production"}, &stdout, &stderr)
+	if code != 1 {
+		t.Errorf("exit code = %d, want 1 (past usage validation, failed at OIDC)", code)
+	}
+	if !strings.Contains(stderr.String(), "acquire OIDC token") {
+		t.Errorf("stderr = %q, want it to mention acquiring an OIDC token", stderr.String())
+	}
+}
+
+func TestRunDeploy_RejectsPositionalArgs(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := runDeploy(context.Background(), []string{"-env", "production", "-commit", "abc1234", "stray-arg"}, &stdout, &stderr)
+	if code != 2 {
+		t.Errorf("exit code = %d, want 2 (usage error) — the build-instance-id positional arg is gone as of DRFT-92", code)
+	}
+}
+
+func TestRunDeploy_FailsWithoutOIDCEnv(t *testing.T) {
+	t.Setenv("ACTIONS_ID_TOKEN_REQUEST_URL", "")
+	t.Setenv("ACTIONS_ID_TOKEN_REQUEST_TOKEN", "")
+
+	var stdout, stderr bytes.Buffer
+	code := runDeploy(context.Background(), []string{"-env", "production", "-commit", "abc1234"}, &stdout, &stderr)
+	if code != 1 {
+		t.Errorf("exit code = %d, want 1", code)
+	}
+	if !strings.Contains(stderr.String(), "acquire OIDC token") {
+		t.Errorf("stderr = %q, want it to mention acquiring an OIDC token", stderr.String())
+	}
+}
+
+func TestRunDeploy_BestEffortWarnsAndExitsZeroOnFailure(t *testing.T) {
+	t.Setenv("ACTIONS_ID_TOKEN_REQUEST_URL", "")
+	t.Setenv("ACTIONS_ID_TOKEN_REQUEST_TOKEN", "")
+
+	var stdout, stderr bytes.Buffer
+	code := runDeploy(context.Background(), []string{"-env", "production", "-commit", "abc1234", "-best-effort"}, &stdout, &stderr)
+	if code != 0 {
+		t.Errorf("exit code = %d, want 0 (-best-effort)", code)
+	}
+	if !strings.Contains(stderr.String(), "acquire OIDC token") {
+		t.Errorf("stderr = %q, want it to still mention the underlying failure", stderr.String())
+	}
+}
+
 func TestMaybeAuthorize_FailsLoudOnRepositoryAlreadyBound(t *testing.T) {
 	srv := authorizeServer(t, http.StatusConflict, map[string]any{
 		"error": map[string]any{"code": "repository_already_bound", "message": "This repository is already bound to a different organization."},
