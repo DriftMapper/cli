@@ -20,6 +20,13 @@
 // subcommand, dispatched the same way: acquire a workload OIDC token and
 // call RecordDeployment. Deliberately a separate, explicit CI step from the
 // default action rather than folded in — see runDeploy's doc comment.
+//
+// `verify` (spec's Assertion/Binding model, DRFT-96) is a third write
+// subcommand, dispatched identically: acquire a workload OIDC token and
+// call RecordVerification. A pure write like deploy — no fetch, no
+// comparison against reality — asserting a build-instance id was observed
+// live in an environment, on its own schedule, independent of deploy. See
+// runVerify's doc comment.
 package main
 
 import (
@@ -65,6 +72,9 @@ func main() {
 	}
 	if len(os.Args) > 1 && os.Args[1] == "deploy" {
 		os.Exit(runDeploy(context.Background(), os.Args[2:], os.Stdout, os.Stderr))
+	}
+	if len(os.Args) > 1 && os.Args[1] == "verify" {
+		os.Exit(runVerify(context.Background(), os.Args[2:], os.Stdout, os.Stderr))
 	}
 
 	output := flag.String("output", "", "path to write build-info.html (default: $DRIFTMAPPER_BUILD_INFO_FILE, or build-info.html)")
@@ -329,4 +339,101 @@ func deployError(err error) error {
 		}
 	}
 	return fmt.Errorf("record deployment: %w", err)
+}
+
+// runVerify implements `driftmapper verify -env=<name> <build-instance-id>`
+// (spec's Assertion/Binding model, DRFT-96): acquires a workload OIDC token
+// the same way runDeploy does — this is a CI-originated write, same trust
+// model as register and deploy — and calls RecordVerification, which writes
+// a kind='verify' assertion: this identity asserts the build-instance id was
+// observed live in the named environment.
+//
+// Deliberately a pure write with no fetch: the build-instance id is read
+// off the deployed build-info.html by the caller's own pipeline (the same
+// copy-paste loop `compare` documents) and passed as the positional
+// argument. DriftMapper does not itself check the claim against reality
+// (DRFT-27); a disagreement between a deploy claim and a verify claim is
+// the drift signal, surfaced at read time, not a failure here. Unlike the
+// superseded DRFT-93 design, this never gates or retries a deploy call —
+// it is independent, on its own schedule, callable from a separate CI job
+// or repo.
+//
+// -best-effort turns a failure into a warning on stderr and exit 0 instead
+// of the default exit 1, mirroring deploy: a verify step that would rather
+// not red the whole verify job over a Driftmapper outage.
+func runVerify(ctx context.Context, args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("verify", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	env := fs.String("env", "", "environment this build was verified live in, e.g. production (required)")
+	bestEffort := fs.Bool("best-effort", false, "on failure, warn on stderr and exit 0 instead of exiting 1")
+	fs.Usage = func() {
+		fmt.Fprintln(stderr, "usage: driftmapper verify -env=<name> [-best-effort] <build-instance-id>")
+		fs.PrintDefaults()
+	}
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if fs.NArg() != 1 || *env == "" {
+		fs.Usage()
+		return 2
+	}
+
+	if err := doVerify(ctx, stdout, fs.Arg(0), *env); err != nil {
+		if *bestEffort {
+			fmt.Fprintln(stderr, "driftmapper: (best-effort, continuing) "+err.Error())
+			return 0
+		}
+		fmt.Fprintln(stderr, "driftmapper:", err)
+		return 1
+	}
+	return 0
+}
+
+// doVerify acquires an OIDC token and calls recordVerification — split out
+// of runVerify so -best-effort's exit-0-on-failure applies uniformly to
+// every failure mode (OIDC acquisition included), not just a
+// RecordVerification error.
+func doVerify(ctx context.Context, stdout io.Writer, buildInstanceID, environment string) error {
+	token, err := oidcclient.AcquireGitHubActionsToken(ctx, config.OIDCAudience())
+	if err != nil {
+		return fmt.Errorf("acquire OIDC token: %w", err)
+	}
+
+	client := apiclient.New(config.APIURL(), token)
+	return recordVerification(ctx, stdout, client, buildInstanceID, environment)
+}
+
+// recordVerification calls RecordVerification and prints a confirmation to
+// w, matching recordDeployment's own "%s build %s -> %s\n" style rather
+// than inventing a new output convention for a second write command.
+func recordVerification(ctx context.Context, w io.Writer, client *apiclient.Client, buildInstanceID, environment string) error {
+	verification, created, err := client.RecordVerification(ctx, buildInstanceID, environment)
+	if err != nil {
+		return verifyError(err)
+	}
+	verb := "Verified"
+	if !created {
+		verb = "Already verified (idempotent retry)"
+	}
+	fmt.Fprintf(w, "%s build %s -> verified in %s\n", verb, verification.BuildInstanceId, verification.Environment)
+	return nil
+}
+
+// verifyError wraps a RecordVerification failure. Mirrors deployError's
+// shape: no_live_policy gets the same actionable dashboard guidance. The
+// 404 case covers both "no build registered for this build-instance id"
+// and "this repository holds no verify binding toward the build's owner"
+// — the server deliberately collapses them (existence hiding), so the
+// message names both. Every other code wraps generically.
+func verifyError(err error) error {
+	var apiErr *apiclient.Error
+	if errors.As(err, &apiErr) {
+		switch apiErr.Code {
+		case "no_live_policy":
+			return fmt.Errorf("record verification: %s — add this repository from the dashboard (\"Add a repository\") and set DRIFTMAPPER_CHALLENGE, then re-run register", apiErr.Message)
+		case "not_found":
+			return fmt.Errorf("record verification: %s — no build is registered for this build-instance id under this repository, or this repository has no verify binding to the build's owner; did the build step run first (same repository token), and does an admin hold a verify binding if this isn't the owning repository?", apiErr.Message)
+		}
+	}
+	return fmt.Errorf("record verification: %w", err)
 }

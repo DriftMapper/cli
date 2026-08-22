@@ -1,6 +1,2 @@
-github.com/driftmapper/protocol v0.5.1-0.20260820113908-49a96b2f2010 h1:j41g9keJWPHjmPeiJOA03cH/19Xy+rFx0VLenBv7eCw=
-github.com/driftmapper/protocol v0.5.1-0.20260820113908-49a96b2f2010/go.mod h1:GnExj2ZevcTrru7gjm40j8yZtnaAgKWsPelBvp/d260=
-github.com/driftmapper/protocol v0.8.1-0.20260821161340-12f39ca7d6c2 h1:rRy4qYaNGvJctuT4Nhwq1TqFZcG00MGqSY+w5oibaC8=
-github.com/driftmapper/protocol v0.8.1-0.20260821161340-12f39ca7d6c2/go.mod h1:GnExj2ZevcTrru7gjm40j8yZtnaAgKWsPelBvp/d260=
-github.com/driftmapper/protocol v0.9.0 h1:n4EOviw7pHiK29JnVxzIsYXhotAEF9XSWmTmpIB/R88=
-github.com/driftmapper/protocol v0.9.0/go.mod h1:GnExj2ZevcTrru7gjm40j8yZtnaAgKWsPelBvp/d260=
+github.com/driftmapper/protocol v0.9.1 h1:QXX3el1jYfBHHJjpzkJBjU32Qt+6Sn1Z+Cfdwb2iagE=
+github.com/driftmapper/protocol v0.9.1/go.mod h1:GnExj2ZevcTrru7gjm40j8yZtnaAgKWsPelBvp/d260=

@@ -409,3 +409,154 @@ func TestMaybeAuthorize_FailsLoudOnRepositoryAlreadyBound(t *testing.T) {
 		t.Errorf("err = %q, want it to mention repository_already_bound", err.Error())
 	}
 }
+
+// verificationServer stubs POST /v1/verifications, returning status/body
+// for every request regardless of the payload presented.
+func verificationServer(t *testing.T, status int, body map[string]any) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(status)
+		json.NewEncoder(w).Encode(body)
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+func TestRecordVerification_SuccessPrintsConfirmation(t *testing.T) {
+	srv := verificationServer(t, http.StatusCreated, map[string]any{
+		"data": protocol.Verification{BuildInstanceId: "build1", Environment: "production"},
+	})
+	client := apiclient.New(srv.URL, "tok")
+
+	var stdout bytes.Buffer
+	if err := recordVerification(context.Background(), &stdout, client, "build1", "production"); err != nil {
+		t.Fatalf("recordVerification: %v", err)
+	}
+	out := stdout.String()
+	if !strings.Contains(out, "Verified") || !strings.Contains(out, "build1") || !strings.Contains(out, "production") {
+		t.Errorf("stdout = %q, want it to mention Verified, build1, and production", out)
+	}
+}
+
+func TestRecordVerification_IdempotentRetryPrintsDistinctVerb(t *testing.T) {
+	srv := verificationServer(t, http.StatusOK, map[string]any{
+		"data": protocol.Verification{BuildInstanceId: "build1", Environment: "production"},
+	})
+	client := apiclient.New(srv.URL, "tok")
+
+	var stdout bytes.Buffer
+	if err := recordVerification(context.Background(), &stdout, client, "build1", "production"); err != nil {
+		t.Fatalf("recordVerification: %v", err)
+	}
+	if !strings.Contains(stdout.String(), "Already verified") {
+		t.Errorf("stdout = %q, want it to mention \"Already verified\"", stdout.String())
+	}
+}
+
+func TestRecordVerification_FailsLoudOnError(t *testing.T) {
+	srv := verificationServer(t, http.StatusUnprocessableEntity, map[string]any{
+		"error": map[string]any{"code": "validation", "message": "environment must be 1-63 characters..."},
+	})
+	client := apiclient.New(srv.URL, "tok")
+
+	var stdout bytes.Buffer
+	err := recordVerification(context.Background(), &stdout, client, "build1", "Not Valid")
+	if err == nil {
+		t.Fatal("recordVerification: want error, got nil")
+	}
+	if stdout.Len() != 0 {
+		t.Errorf("stdout = %q, want empty on failure", stdout.String())
+	}
+}
+
+func TestVerifyError_NoLivePolicyGetsActionableGuidance(t *testing.T) {
+	apiErr := &apiclient.Error{StatusCode: http.StatusForbidden, Code: "no_live_policy", Message: "This repository has no live trusted-workload policy."}
+	err := verifyError(apiErr)
+	if err == nil {
+		t.Fatal("verifyError: want error, got nil")
+	}
+	for _, want := range []string{"record verification", apiErr.Message, "Add a repository", "DRIFTMAPPER_CHALLENGE"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("err = %q, want it to contain %q", err.Error(), want)
+		}
+	}
+}
+
+func TestVerifyError_NotFoundGetsActionableGuidance(t *testing.T) {
+	apiErr := &apiclient.Error{StatusCode: http.StatusNotFound, Code: "not_found", Message: "No build is registered for this id."}
+	err := verifyError(apiErr)
+	if err == nil {
+		t.Fatal("verifyError: want error, got nil")
+	}
+	for _, want := range []string{"record verification", apiErr.Message, "verify binding"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("err = %q, want it to contain %q", err.Error(), want)
+		}
+	}
+}
+
+func TestVerifyError_OtherCodesWrapGenerically(t *testing.T) {
+	apiErr := &apiclient.Error{StatusCode: http.StatusForbidden, Code: "claim_mismatch", Message: "claim mismatch on workflow"}
+	err := verifyError(apiErr)
+	if err == nil {
+		t.Fatal("verifyError: want error, got nil")
+	}
+	if !strings.Contains(err.Error(), "record verification") || !strings.Contains(err.Error(), "claim_mismatch") {
+		t.Errorf("err = %q, want it to mention both \"record verification\" and \"claim_mismatch\"", err.Error())
+	}
+	if strings.Contains(err.Error(), "DRIFTMAPPER_CHALLENGE") {
+		t.Errorf("err = %q, want no challenge guidance for a non-no_live_policy error", err.Error())
+	}
+}
+
+func TestRunVerify_RequiresEnvFlag(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := runVerify(context.Background(), []string{"build1"}, &stdout, &stderr)
+	if code != 2 {
+		t.Errorf("exit code = %d, want 2 (usage error)", code)
+	}
+}
+
+func TestRunVerify_RequiresBuildID(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := runVerify(context.Background(), []string{"-env", "production"}, &stdout, &stderr)
+	if code != 2 {
+		t.Errorf("exit code = %d, want 2 (usage error)", code)
+	}
+}
+
+func TestRunVerify_RejectsExtraArgs(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := runVerify(context.Background(), []string{"-env", "production", "build1", "stray"}, &stdout, &stderr)
+	if code != 2 {
+		t.Errorf("exit code = %d, want 2 (usage error)", code)
+	}
+}
+
+func TestRunVerify_FailsWithoutOIDCEnv(t *testing.T) {
+	t.Setenv("ACTIONS_ID_TOKEN_REQUEST_URL", "")
+	t.Setenv("ACTIONS_ID_TOKEN_REQUEST_TOKEN", "")
+
+	var stdout, stderr bytes.Buffer
+	code := runVerify(context.Background(), []string{"-env", "production", "build1"}, &stdout, &stderr)
+	if code != 1 {
+		t.Errorf("exit code = %d, want 1", code)
+	}
+	if !strings.Contains(stderr.String(), "acquire OIDC token") {
+		t.Errorf("stderr = %q, want it to mention acquiring an OIDC token", stderr.String())
+	}
+}
+
+func TestRunVerify_BestEffortWarnsAndExitsZeroOnFailure(t *testing.T) {
+	t.Setenv("ACTIONS_ID_TOKEN_REQUEST_URL", "")
+	t.Setenv("ACTIONS_ID_TOKEN_REQUEST_TOKEN", "")
+
+	var stdout, stderr bytes.Buffer
+	code := runVerify(context.Background(), []string{"-env", "production", "-best-effort", "build1"}, &stdout, &stderr)
+	if code != 0 {
+		t.Errorf("exit code = %d, want 0 (-best-effort)", code)
+	}
+	if !strings.Contains(stderr.String(), "acquire OIDC token") {
+		t.Errorf("stderr = %q, want it to still mention the underlying failure", stderr.String())
+	}
+}
