@@ -12,9 +12,13 @@ workload OIDC token, `POST /v1/builds`, write `build-info.html` from the respons
 the repository to an org — before registering; still a write, not a read. See "Gotcha —
 challenge redemption is folded into the default action, not a separate command" below.
 
-`compare` (spec DRFT-50, superseding DRFT-26) is the one other subcommand — a pure browser
-launcher for the SPA compare view (DRFT-29, `driftmapper/static`), with zero network calls of
+`compare` (spec DRFT-50, superseding DRFT-26) is a pure browser launcher for the
+SPA compare view (DRFT-29, `driftmapper/static`), with zero network calls of
 its own. See "Gotcha — `compare` is a browser launcher, not a read command" below.
+`deploy` (DRFT-88) and `verify` (DRFT-96) are the two additional write
+subcommands — CI steps that record a deploy-mark or a verify assertion on
+the same OIDC identity, dispatched the same way `compare` is. All three stay
+writes (or no-op hand-offs); nothing here reads from the API.
 
 Distributed via npm (`npx @driftmapper/cli`) with per-platform binaries resolved through npm's
 `os`/`cpu` fields as `optionalDependencies`, plus raw binaries on GitHub Releases as a fallback
@@ -53,10 +57,12 @@ npm run test:e2e      # pack-and-install e2e — see the gotcha below on why thi
 ## Architecture
 
 ```
-cmd/driftmapper/main.go   entry point; dispatches to `compare` before the default action's
-                          own flag.Parse() runs, so the two never collide; version + name
-                          stamped/declared here — name is the version-sentinel contract
-                          with the npm launcher, see gotcha below
+cmd/driftmapper/main.go   entry point; dispatches to `compare`, `deploy`, and
+                          `verify` before the default action's own flag.Parse()
+                          runs, so the subcommands never collide with the
+                          default action's flags; version + name stamped/
+                          declared here — name is the version-sentinel
+                          contract with the npm launcher, see gotcha below
 internal/
   config/                 DRIFTMAPPER_API_URL / DRIFTMAPPER_OIDC_AUDIENCE / build-info
                           path, all zero-config-by-default (spec §5.2a). DashboardURL

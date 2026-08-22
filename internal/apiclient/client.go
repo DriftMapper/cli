@@ -151,6 +151,45 @@ func (c *Client) recordDeploymentOnce(ctx context.Context, commitSHA, environmen
 	return deployment, status == http.StatusCreated, nil
 }
 
+// RecordVerification calls POST /v1/verifications (spec's Assertion/Binding
+// model, DRFT-96) — records that this identity asserts buildInstanceID was
+// observed live in environment. A pure write, exactly like
+// RecordDeployment: no fetch, no comparison against reality; the
+// build-instance id is read off the deployed build-info.html by the
+// caller's own pipeline and passed directly (unlike deploy, which resolves
+// a commit). created is false when the server returned 200 (an identical
+// retry, same CI run, hit the dedupe key), true on 201.
+//
+// Retries transient failures per deployRetryBackoff; a genuine 4xx is
+// permanent and returned on the first attempt, never retried.
+func (c *Client) RecordVerification(ctx context.Context, buildInstanceID, environment string) (verification protocol.Verification, created bool, err error) {
+	for attempt := 0; ; attempt++ {
+		verification, created, err = c.recordVerificationOnce(ctx, buildInstanceID, environment)
+		if err == nil || !isTransient(err) || attempt >= len(deployRetryBackoff) {
+			return verification, created, err
+		}
+		select {
+		case <-time.After(deployRetryBackoff[attempt]):
+		case <-ctx.Done():
+			return protocol.Verification{}, false, ctx.Err()
+		}
+	}
+}
+
+func (c *Client) recordVerificationOnce(ctx context.Context, buildInstanceID, environment string) (verification protocol.Verification, created bool, err error) {
+	data, status, err := c.doJSON(ctx, "/v1/verifications", protocol.VerificationRequest{
+		BuildInstanceId: buildInstanceID,
+		Environment:     environment,
+	}, http.StatusOK, http.StatusCreated)
+	if err != nil {
+		return protocol.Verification{}, false, err
+	}
+	if err := json.Unmarshal(data, &verification); err != nil {
+		return protocol.Verification{}, false, fmt.Errorf("decode verification (status %d): %w", status, err)
+	}
+	return verification, status == http.StatusCreated, nil
+}
+
 // isTransient reports whether err is worth retrying: a connection-level
 // failure (doJSON's http.Client.Do never got a response at all, surfaced as
 // *url.Error) or a *Error carrying a 5xx or 429 — server overload/rate

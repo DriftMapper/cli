@@ -2,9 +2,11 @@
 
 The Driftmapper CLI: registers a build from inside your CI so Driftmapper can track it.
 The default action is write-only — it acquires a workload OIDC token, calls `POST
-/v1/builds`, and writes `build-info.html`. Two other subcommands: `deploy` (below) records
-that a registered build is now deployed to an environment, using the same OIDC token; `compare`
-(below) is a browser launcher with zero network calls of its own, not a read command.
+/v1/builds`, and writes `build-info.html`. Three other subcommands: `deploy` (below) records
+that a registered build is now deployed to an environment; `verify` (below) records an
+identity asserting a build was observed live in one; and `compare` (below) is a browser
+launcher with zero network calls of its own, not a read command. All three use the same
+workload OIDC token.
 
 ## Install and use
 
@@ -124,6 +126,30 @@ and continue (exit 0) than fail the whole deploy job when Driftmapper itself is 
 If you'd rather not integrate this into CI at all, an org admin/owner can mark a deploy
 manually from that build's resolution page in the dashboard instead — a fallback path that
 doesn't require any CI changes.
+
+### Recording a verification
+
+```yaml
+permissions:
+  id-token: write   # required — same OIDC token as registration
+steps:
+  - run: npx @driftmapper/cli verify -env=production <build-instance-id>
+```
+
+`verify` records that an identity asserts a build was observed live in an environment — a
+pure write, exactly like `deploy`, on its own schedule and independent of it. The
+build-instance ID is the positional argument: read it off the deployed `build-info.html`
+(the same copy-paste loop `compare` documents), or thread it through your pipeline however
+it already carries build metadata. Driftmapper doesn't fetch your environment or check the
+claim against reality; a later disagreement between the latest deploy claim and the latest
+verify claim for a build+environment *is* the drift signal, surfaced at read time.
+
+It's deliberately a separate CI step so a different identity can verify — e.g. an
+e2e-test repo (not the deployer) asserting after its own checks. Same-repo verification is
+ungated; a separate repo verifying another repo's builds needs an admin/owner to establish
+a `verify` binding between them from the dashboard. Rerunning the same CI run is a harmless
+no-op; add `-best-effort` to warn-and-continue (exit 0) rather than red the verify job on a
+Driftmapper outage.
 
 ### Environment variables
 
