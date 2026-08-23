@@ -399,16 +399,22 @@ func TestAuthorizeRepository_ErrorCodes(t *testing.T) {
 	}
 }
 
-// --- getDeployment + enriched recordVerification (DRFT-98) --------------
+// --- getCurrentDeployment + enriched recordVerification (DRFT-98) -------
 
-func TestGetDeployment_Success(t *testing.T) {
+func TestGetCurrentDeployment_Success(t *testing.T) {
 	recordedURL := "https://prod.example.test/build-info.html"
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if got := r.Method; got != http.MethodGet {
 			t.Errorf("method = %q, want GET", got)
 		}
-		if got := r.URL.Path; got != "/v1/deployments/7" {
-			t.Errorf("path = %q, want /v1/deployments/7", got)
+		if got := r.URL.Path; got != "/v1/deployments/current" {
+			t.Errorf("path = %q, want /v1/deployments/current", got)
+		}
+		if got := r.URL.Query().Get("env"); got != "production" {
+			t.Errorf("env = %q, want production", got)
+		}
+		if got := r.URL.Query().Get("repo"); got != "" {
+			t.Errorf("repo = %q, want absent for own-repository reads", got)
 		}
 		if got := r.Header.Get("Authorization"); got != "Bearer tok" {
 			t.Errorf("Authorization = %q, want %q", got, "Bearer tok")
@@ -426,9 +432,9 @@ func TestGetDeployment_Success(t *testing.T) {
 	defer srv.Close()
 
 	client := New(srv.URL, "tok")
-	deployment, err := client.GetDeployment(context.Background(), 7)
+	deployment, err := client.GetCurrentDeployment(context.Background(), "", "production")
 	if err != nil {
-		t.Fatalf("GetDeployment: %v", err)
+		t.Fatalf("GetCurrentDeployment: %v", err)
 	}
 	if deployment.BuildInstanceId != "b-1" || deployment.Environment != "production" {
 		t.Errorf("deployment = %+v, want build b-1 in production", deployment)
@@ -441,19 +447,43 @@ func TestGetDeployment_Success(t *testing.T) {
 	}
 }
 
-func TestGetDeployment_ErrorCodesArePermanent(t *testing.T) {
-	var requests int
+func TestGetCurrentDeployment_PassesTargetRepoThrough(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		requests++
-		w.WriteHeader(http.StatusNotFound)
+		if got := r.URL.Query().Get("repo"); got != "acme/checkout" {
+			t.Errorf("repo = %q, want acme/checkout (cross-repo verification)", got)
+		}
+		if got := r.URL.Query().Get("env"); got != "staging" {
+			t.Errorf("env = %q, want staging", got)
+		}
 		json.NewEncoder(w).Encode(map[string]any{
-			"error": map[string]any{"code": "not_found", "message": "no such deployment."},
+			"data": protocol.Deployment{Id: 9, Kind: protocol.Deploy, BuildInstanceId: "b-2", Environment: "staging"},
 		})
 	}))
 	defer srv.Close()
 
 	client := New(srv.URL, "tok")
-	_, err := client.GetDeployment(context.Background(), 99)
+	deployment, err := client.GetCurrentDeployment(context.Background(), "acme/checkout", "staging")
+	if err != nil {
+		t.Fatalf("GetCurrentDeployment: %v", err)
+	}
+	if deployment.BuildInstanceId != "b-2" {
+		t.Errorf("build_instance_id = %q, want b-2", deployment.BuildInstanceId)
+	}
+}
+
+func TestGetCurrentDeployment_ErrorCodesArePermanent(t *testing.T) {
+	var requests int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		w.WriteHeader(http.StatusNotFound)
+		json.NewEncoder(w).Encode(map[string]any{
+			"error": map[string]any{"code": "not_found", "message": "nothing verifiable under that coordinate."},
+		})
+	}))
+	defer srv.Close()
+
+	client := New(srv.URL, "tok")
+	_, err := client.GetCurrentDeployment(context.Background(), "", "prodction")
 	apiErr, ok := err.(*Error)
 	if !ok {
 		t.Fatalf("err is %T, want *apiclient.Error", err)

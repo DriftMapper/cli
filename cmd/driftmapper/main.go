@@ -10,8 +10,8 @@
 // its own doc comment for why it's folded into register rather than a
 // separate command, and how its failure modes are handled.
 //
-// `compare` (spec DRFT-50) is the one read subcommand: an unauthenticated
-// browser launcher for the SPA compare view (DRFT-29), dispatched on before
+// `compare` (spec DRFT-50) is a pure browser launcher for the SPA compare
+// view (DRFT-29), dispatched on before
 // the default action's own flag.Parse() ever runs — see runCompare and
 // internal/compare's doc comment for why it performs no network calls of
 // its own.
@@ -22,10 +22,11 @@
 // default action rather than folded in — see runDeploy's doc comment.
 //
 // `verify` (DRFT-98, DRFT-101's opinionated verification) is a third
-// subcommand: resolve a deployment by its ledger-row ID, fetch the URL
-// that deployment recorded, parse the deployed build-info.html meta tags
+// subcommand: resolve what's currently deployed to a named environment
+// via GET /v1/deployments/current, fetch that deployment's recorded URL,
+// parse the deployed build-info.html meta tags
 // with internal/buildinfo's parser, compare what was found against what
-// the deployment claims, and record the outcome via RecordVerification —
+// the row claims, and record the outcome via RecordVerification —
 // whatever the outcome was, including fetch/parse failures and mismatches.
 // DriftMapper-the-service still checks nothing itself (DRFT-27): the
 // fetch lives here, in the customer's own CI. See runVerify's doc comment.
@@ -39,7 +40,7 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"strconv"
+	"regexp"
 	"strings"
 
 	"github.com/driftmapper/cli/internal/apiclient"
@@ -347,52 +348,60 @@ func deployError(err error) error {
 	return fmt.Errorf("record deployment: %w", err)
 }
 
-// runVerify implements `driftmapper verify [-url=<target>]
-// [-header='Name: value']... [-best-effort] <deployment-id>`
+// runVerify implements `driftmapper verify [-repo=<owner/name>]
+// [-url=<target>] [-header='Name: value']... [-best-effort] <environment>`
 // (DRFT-98/DRFT-101's opinionated verification): you build an artifact,
-// deploy an artifact, verify a deployment — so the positional argument is
-// the deployment row ID the deploy step's output emitted, and everything
-// else (expected build, environment, target URL) comes from that row.
+// deploy an artifact, verify what's currently deployed. The positional
+// argument is the environment name the deploy step already used — a
+// constant requiring nothing captured between CI steps — and everything
+// else (expected build, fetch target) comes from that environment's
+// current deployment row.
 //
 // The flow: acquire a workload OIDC token exactly like runDeploy does
-// (same trust model as register and deploy), GetDeployment to resolve the
-// handle, fetch the recorded URL via internal/sitefetch, parse the served
-// meta tags via internal/buildinfo.Parse, compare against the deployment's
-// expected build, and record what was found — whatever was found — via
-// RecordVerification. DriftMapper-the-service still fetches nothing
-// itself (DRFT-27); the fetch lives here, on infrastructure the customer
-// controls, which is why this command may do it when the server must not.
+// (same trust model as register and deploy), GetCurrentDeployment to
+// resolve the newest claim for (repository, environment), fetch its
+// recorded URL via internal/sitefetch, parse the served meta tags via
+// internal/buildinfo.Parse, compare against the row's expected build, and
+// record what was found — whatever was found — via RecordVerification.
+// DriftMapper-the-service still fetches nothing itself (DRFT-27); the
+// fetch lives here, on infrastructure the customer controls, which is why
+// this command may do it when the server must not.
 //
 // Outcomes and exit codes:
 //
 //   - observed == expected → recorded with outcome=verified, exit 0.
-//   - observed != expected → recorded with outcome=mismatch, exit 3. A
-//     mismatch IS the drift signal, not a tool failure: it is always
-//     recorded before exiting, and -best-effort never swallows it.
+//   - observed != expected → exit 3 — always, even when an API outage
+//     prevented the mismatch row from landing (the DRIFT line prints
+//     regardless). A mismatch IS the drift signal, not a tool failure,
+//     and -best-effort never swallows it: scheduled monitors silence it
+//     with continue-on-error instead; post-deploy gates red on it.
 //   - unreachable/non-200/unparsable content → recorded as
 //     outcome=fetch_failed / parse_failed (failed observations are
 //     assertions too), then exit 1 — or 0 under -best-effort, which covers
 //     outages and lost data points, never drift.
-//   - failures before anything could be recorded (OIDC acquisition,
-//     GetDeployment) are plain operational errors: exit 1, or 0 under
+//   - failures before anything could be checked (OIDC acquisition,
+//     resolution) are plain operational errors: exit 1, or 0 under
 //     -best-effort.
 //
-// -url supplies the fetch target only when the deployment has none
-// recorded; when both exist the deployment's own URL wins and the flag is
-// ignored with a warning — verifying expectation X at a self-chosen other
-// URL would manufacture mismatches. -header repeats for authenticated
-// targets (staging behind a gateway) and is stripped automatically if a
-// redirect leaves the original host.
+// -url supplies the fetch target only when the current deployment records
+// none; when both exist the row's own URL wins and the flag is ignored
+// with a warning — verifying expectation X at a self-chosen other URL
+// would manufacture mismatches. -header repeats for authenticated targets
+// (staging behind a gateway) and is stripped automatically if a redirect
+// leaves the original host. -repo targets another repository's
+// environment (independent verification by an e2e repo) and requires an
+// admin-created verify binding toward it.
 func runVerify(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("verify", flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	urlOverride := fs.String("url", "", "fallback fetch target when the deployment has no url recorded")
+	repo := fs.String("repo", "", "owner/name of another repository whose environment to verify (requires an admin-created verify binding toward it)")
+	urlOverride := fs.String("url", "", "fallback fetch target when the current deployment records no url")
 	var headers headerFlags
 	fs.Var(&headers, "header", "extra request header for the fetch, \"Name: value\" (repeatable; stripped on cross-origin redirects)")
 	bestEffort := fs.Bool("best-effort", false, "on outage/failure, warn on stderr and exit 0 instead of exiting 1 (never applies to a mismatch)")
 	fs.Usage = func() {
-		fmt.Fprintln(stderr, "usage: driftmapper verify [-url=<target>] [-header='Name: value']... [-best-effort] <deployment-id>")
-		fmt.Fprintln(stderr, "\n  resolves the deployment, fetches its build-info.html, records what it found.")
+		fmt.Fprintln(stderr, "usage: driftmapper verify [-repo=<owner/name>] [-url=<target>] [-header='Name: value']... [-best-effort] <environment>")
+		fmt.Fprintln(stderr, "\n  resolves what's currently deployed to <environment>, fetches its build-info.html, records what it found.")
 		fmt.Fprintln(stderr, "  exits 3 on a mismatch — the drift signal — even under -best-effort.")
 		fs.PrintDefaults()
 	}
@@ -403,13 +412,23 @@ func runVerify(ctx context.Context, args []string, stdout, stderr io.Writer) int
 		fs.Usage()
 		return 2
 	}
-	deploymentID, err := strconv.ParseInt(fs.Arg(0), 10, 64)
-	if err != nil || deploymentID <= 0 {
-		fmt.Fprintf(stderr, "driftmapper: deployment id %q must be a positive integer (the number `driftmapper deploy` printed)\n", fs.Arg(0))
+	environment := fs.Arg(0)
+	if !environmentRe.MatchString(environment) {
+		fmt.Fprintf(stderr, "driftmapper: environment %q must be lowercase alphanumeric/hyphens, 1-63 characters, starting and ending alphanumeric\n", environment)
 		return 2
 	}
 
-	res, err := doVerify(ctx, stdout, stderr, deploymentID, *urlOverride, headers)
+	res, err := doVerify(ctx, stdout, stderr, *repo, environment, *urlOverride, headers)
+	if res.outcome == protocol.VerificationRequestOutcomeMismatch {
+		// The drift signal outranks everything downstream of it: printed
+		// by doVerify before this point, never swallowed by -best-effort,
+		// and still 3 when recording itself failed (the record error is
+		// surfaced below so the outage isn't hidden either).
+		if err != nil {
+			fmt.Fprintln(stderr, "driftmapper:", err)
+		}
+		return 3
+	}
 	if err != nil {
 		if *bestEffort {
 			fmt.Fprintln(stderr, "driftmapper: (best-effort, continuing) "+err.Error())
@@ -421,9 +440,6 @@ func runVerify(ctx context.Context, args []string, stdout, stderr io.Writer) int
 	switch res.outcome {
 	case protocol.VerificationRequestOutcomeVerified:
 		return 0
-	case protocol.VerificationRequestOutcomeMismatch:
-		// Recorded already (doVerify prints the DRIFT line). Never swallowed.
-		return 3
 	default:
 		if *bestEffort {
 			fmt.Fprintf(stderr, "driftmapper: (best-effort, continuing) %s: %s\n", res.outcome, res.detail)
@@ -433,6 +449,14 @@ func runVerify(ctx context.Context, args []string, stdout, stderr io.Writer) int
 		return 1
 	}
 }
+
+// environmentRe mirrors the server's DNS-label-style rule for deploy-target
+// environments (protocol Deployment.environment): lowercase alphanumeric
+// and hyphens, 1-63 characters, starting and ending alphanumeric. Checking
+// here turns a malformed name into an immediate usage error instead of a
+// network round-trip; a well-formed but unknown name stays a server-side
+// indistinguishable 404, since no pre-registration exists to check against.
+var environmentRe = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`)
 
 // headerFlags collects repeatable -header values.
 type headerFlags []sitefetch.Header
@@ -474,16 +498,16 @@ var verifyFetcher = sitefetch.New
 // Confirmation lines print in recordDeployment's "%s ... -> %s\n" house
 // style; a DRIFT line prints before returning a mismatch so the signal is
 // visible in the CI log regardless of exit-code handling.
-func doVerify(ctx context.Context, stdout, stderr io.Writer, deploymentID int64, urlOverride string, headers headerFlags) (verifyResult, error) {
+func doVerify(ctx context.Context, stdout, stderr io.Writer, targetRepo, environment, urlOverride string, headers headerFlags) (verifyResult, error) {
 	token, err := oidcclient.AcquireGitHubActionsToken(ctx, config.OIDCAudience())
 	if err != nil {
 		return verifyResult{}, fmt.Errorf("acquire OIDC token: %w", err)
 	}
 	client := apiclient.New(config.APIURL(), token)
 
-	deployment, err := client.GetDeployment(ctx, deploymentID)
+	deployment, err := client.GetCurrentDeployment(ctx, targetRepo, environment)
 	if err != nil {
-		return verifyResult{}, getDeploymentError(deploymentID, err)
+		return verifyResult{}, resolveDeploymentError(targetRepo, environment, err)
 	}
 
 	target := ""
@@ -493,21 +517,22 @@ func doVerify(ctx context.Context, stdout, stderr io.Writer, deploymentID int64,
 	if target == "" && urlOverride != "" {
 		target = urlOverride
 	}
-	if target != "" && deployment.Url != nil && *deployment.Url != "" && urlOverride != "" && urlOverride != *deployment.Url {
+	if urlOverride != "" && target != urlOverride {
 		fmt.Fprintf(stderr, "driftmapper: ignoring -url %q — deployment %d records %q; unrecord the deployment or edit the flag if that row is wrong\n",
-			urlOverride, deploymentID, *deployment.Url)
+			urlOverride, deployment.Id, *deployment.Url)
 	}
 	if target == "" {
-		return verifyResult{}, fmt.Errorf("deployment %d has no url recorded — re-run deploy with -url pointing at its build-info.html, or pass -url here", deploymentID)
+		return verifyResult{}, fmt.Errorf("deployment %d has no url recorded — re-run deploy with -url pointing at its build-info.html, or pass -url here", deployment.Id)
 	}
 
 	fetcher := verifyFetcher(headers)
 	res, fetchErr := fetcher.Do(ctx, target)
 
+	rowID := deployment.Id // provenance only — never a gate or reference
 	req := protocol.VerificationRequest{
 		BuildInstanceId: deployment.BuildInstanceId,
 		Environment:     deployment.Environment,
-		DeploymentId:    &deploymentID,
+		DeploymentId:    &rowID,
 	}
 	outcome := protocol.VerificationRequestOutcomeVerified
 	var observed string
@@ -517,13 +542,13 @@ func doVerify(ctx context.Context, stdout, stderr io.Writer, deploymentID int64,
 	case fetchErr != nil:
 		outcome = protocol.VerificationRequestOutcomeFetchFailed
 		detail = fetchErr.Error()
-		fmt.Fprintf(stdout, "Recorded deployment %d -> fetch failed at %s (%v)\n", deploymentID, target, fetchErr)
+		fmt.Fprintf(stdout, "Recorded deployment %d -> fetch failed at %s (%v)\n", deployment.Id, target, fetchErr)
 	default:
 		info, parseErr := buildinfo.Parse(res.Body)
 		if parseErr != nil {
 			outcome = protocol.VerificationRequestOutcomeParseFailed
 			detail = parseErr.Error()
-			fmt.Fprintf(stdout, "Recorded deployment %d -> unparsable content at %s (%v)\n", deploymentID, res.URL, parseErr)
+			fmt.Fprintf(stdout, "Recorded deployment %d -> unparsable content at %s (%v)\n", deployment.Id, res.URL, parseErr)
 			break
 		}
 		observed = info.BuildInstanceID
@@ -544,17 +569,20 @@ func doVerify(ctx context.Context, stdout, stderr io.Writer, deploymentID int64,
 	if err != nil {
 		if outcome == protocol.VerificationRequestOutcomeMismatch {
 			// The drift was observed but its row did not land — print the
-			// signal before returning the operational failure so it can
-			// never be silently lost to an API outage.
+			// signal before returning so it can never be silently lost to
+			// an API outage. The outcome travels back even though err is
+			// non-nil: runVerify exits 3 either way and surfaces this
+			// error alongside it.
 			fmt.Fprintf(stdout, "DRIFT: deployment %d -> expected build %s, found %s at %s (recording failed)\n",
-				deploymentID, deployment.BuildInstanceId, observed, sourceURL)
+				deployment.Id, deployment.BuildInstanceId, observed, sourceURL)
+			return verifyResult{outcome: outcome}, recordVerificationError(err)
 		}
 		return verifyResult{}, recordVerificationError(err)
 	}
 
 	if outcome == protocol.VerificationRequestOutcomeMismatch {
 		fmt.Fprintf(stdout, "DRIFT: deployment %d -> expected build %s, found %s in %s (%s)\n",
-			deploymentID, deployment.BuildInstanceId, observed, verification.Environment, sourceURL)
+			deployment.Id, deployment.BuildInstanceId, observed, verification.Environment, sourceURL)
 		return verifyResult{outcome: outcome}, nil
 	}
 	if outcome == protocol.VerificationRequestOutcomeVerified {
@@ -563,29 +591,34 @@ func doVerify(ctx context.Context, stdout, stderr io.Writer, deploymentID int64,
 			verb = "Already verified (idempotent retry)"
 		}
 		fmt.Fprintf(stdout, "%s deployment %d -> build %s live in %s\n",
-			verb, deploymentID, verification.BuildInstanceId, verification.Environment)
+			verb, deployment.Id, verification.BuildInstanceId, verification.Environment)
 	}
 	// fetch_failed / parse_failed already printed their descriptive line
 	// before recording; nothing further to add.
 	return verifyResult{outcome: outcome, detail: detail}, nil
 }
 
-// getDeploymentError wraps a GetDeployment failure with actionable
-// guidance, mirroring deployError/verifyError's shape: no_live_policy gets
-// register-style guidance; the 404 deliberately collapses unknown IDs,
-// other-repository deployments, and missing verify bindings into one
-// response (existence hiding), so the message names all three.
-func getDeploymentError(deploymentID int64, err error) error {
+// resolveDeploymentError wraps a GetCurrentDeployment failure with
+// actionable guidance, mirroring deployError's shape: no_live_policy gets
+// register-style guidance; the 404 deliberately collapses "no rows yet for
+// this environment", a misspelled environment name, an unknown -repo
+// target, and a missing verify binding into one response (existence
+// hiding), so the message names every recoverable cause — starting with
+// the exact string the caller typed.
+func resolveDeploymentError(targetRepo, environment string, err error) error {
 	var apiErr *apiclient.Error
 	if errors.As(err, &apiErr) {
 		switch apiErr.Code {
 		case "no_live_policy":
-			return fmt.Errorf("resolve deployment %d: %s — add this repository from the dashboard (\"Add a repository\") and set DRIFTMAPPER_CHALLENGE, then re-run register", deploymentID, apiErr.Message)
+			return fmt.Errorf("resolve deployment for environment %q: %s — add this repository from the dashboard (\"Add a repository\") and set DRIFTMAPPER_CHALLENGE, then re-run register", environment, apiErr.Message)
 		case "not_found":
-			return fmt.Errorf("resolve deployment %d: %s — no such deployment under this repository (did its deploy step run first?), or this repository holds no verify binding toward the deployment's owner", deploymentID, apiErr.Message)
+			if targetRepo != "" {
+				return fmt.Errorf("resolve deployment for %s environment %q: %s — nothing is currently deployed under that exact name (check the -env value the deploy step used), or no admin-created verify binding exists toward %s", targetRepo, environment, apiErr.Message, targetRepo)
+			}
+			return fmt.Errorf("resolve deployment for environment %q: %s — nothing is currently deployed under that exact name; check the -env value your deploy step used", environment, apiErr.Message)
 		}
 	}
-	return fmt.Errorf("resolve deployment %d: %w", deploymentID, err)
+	return fmt.Errorf("resolve deployment for environment %q: %w", environment, err)
 }
 
 // recordVerificationError wraps a RecordVerification failure that happens

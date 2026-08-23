@@ -151,12 +151,25 @@ func (c *Client) recordDeploymentOnce(ctx context.Context, commitSHA, environmen
 	return deployment, status == http.StatusCreated, nil
 }
 
-// GetDeployment calls GET /v1/deployments/{id} (DRFT-98) — the read half
-// of deployment-keyed verification: `driftmapper verify <deployment-id>`
-// knows only the handle its deploy step emitted and needs what the row
-// carries (expected build-instance id, environment, recorded url).
-func (c *Client) GetDeployment(ctx context.Context, deploymentID int64) (deployment protocol.Deployment, err error) {
-	data, status, err := c.do(ctx, http.MethodGet, fmt.Sprintf("/v1/deployments/%d", deploymentID), nil, http.StatusOK)
+// GetCurrentDeployment calls GET /v1/deployments/current (DRFT-98) — the
+// read half of deployment-keyed verification: `driftmapper verify
+// <environment>` names a constant its own deploy step already used and
+// needs what that environment's current deployment row carries (expected
+// build-instance id, recorded url). The server defines "currently
+// deployed" as the newest kind='deploy' row for (repository_id,
+// environment) by created_at — never anything client-supplied.
+//
+// targetRepo is empty to read the token's own repository; non-empty
+// (`owner/name`) it targets another repository's environment, which
+// requires an admin-created kind='verify' binding — without one the 404 is
+// deliberately indistinguishable from an empty coordinate (existence
+// hiding), so callers cannot probe other repositories' environments.
+func (c *Client) GetCurrentDeployment(ctx context.Context, targetRepo, environment string) (deployment protocol.Deployment, err error) {
+	q := url.Values{"env": []string{environment}}
+	if targetRepo != "" {
+		q.Set("repo", targetRepo)
+	}
+	data, status, err := c.do(ctx, http.MethodGet, "/v1/deployments/current?"+q.Encode(), nil, http.StatusOK)
 	if err != nil {
 		return protocol.Deployment{}, err
 	}

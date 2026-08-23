@@ -411,7 +411,6 @@ func TestMaybeAuthorize_FailsLoudOnRepositoryAlreadyBound(t *testing.T) {
 	}
 }
 
-
 // --- verify (DRFT-98): resolve → fetch → parse → compare → record ----
 
 // verifyPage renders a conforming build-info.html for buildInstanceID —
@@ -426,15 +425,20 @@ func verifyPage(buildInstanceID string) string {
 }
 
 // verifyHarness wires everything one full runVerify flow touches:
-// a token endpoint for oidcclient, an API stub (GET /v1/deployments/{id}
-// answers depBodyFn(pageURL); POST /v1/verifications bodies are captured
-// into h.verifications), and an HTTPS page server playing the deployed
-// target — TLS because production sitefetch refuses plain http://127.0.0.1,
-// so these tests exercise the real scheme policy rather than bypassing it.
-// Path "/gone" on the default page always 404s, for fetch-failure cases.
+// a token endpoint for oidcclient, an API stub (GET /v1/deployments/current
+// answers depBodyFn(pageURL), asserting the env query param names
+// "production"; cross-repo repo params land in h.repos; POST
+// /v1/verifications bodies are captured into h.verifications unless
+// h.failVerifications makes the stub return 500), and an HTTPS page server
+// playing the deployed target — TLS because production sitefetch refuses
+// plain http://127.0.0.1, so these tests exercise the real scheme policy
+// rather than bypassing it. Path "/gone" on the default page always 404s,
+// for fetch-failure cases.
 type verifyHarness struct {
-	page          *httptest.Server
-	verifications []protocol.VerificationRequest
+	page              *httptest.Server
+	verifications     []protocol.VerificationRequest
+	repos             []string
+	failVerifications bool
 }
 
 func newVerifyHarness(t *testing.T, pageHandler http.HandlerFunc, depBodyFn func(pageURL string) map[string]any) *verifyHarness {
@@ -472,10 +476,21 @@ func newVerifyHarness(t *testing.T, pageHandler http.HandlerFunc, depBodyFn func
 
 	apiSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
-		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/v1/deployments/"):
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/deployments/current":
+			if got := r.URL.Query().Get("env"); got != "production" {
+				t.Errorf("env = %q, want production (the harness's positional)", got)
+			}
+			h.repos = append(h.repos, r.URL.Query().Get("repo"))
 			w.WriteHeader(http.StatusOK)
 			json.NewEncoder(w).Encode(depBodyFn(page.URL))
 		case r.Method == http.MethodPost && r.URL.Path == "/v1/verifications":
+			if h.failVerifications {
+				w.WriteHeader(http.StatusInternalServerError)
+				json.NewEncoder(w).Encode(map[string]any{
+					"error": map[string]any{"code": "internal", "message": "boom"},
+				})
+				return
+			}
 			var req protocol.VerificationRequest
 			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 				t.Errorf("decode verification body: %v", err)
@@ -504,13 +519,13 @@ func newVerifyHarness(t *testing.T, pageHandler http.HandlerFunc, depBodyFn func
 }
 
 // runVerifyHarness is the common incantation: build the harness whose
-// recorded deployment URL comes from depBodyFn, then run runVerify on
-// deployment 7 with args.
+// recorded deployment URL comes from depBodyFn, then run runVerify for
+// environment "production" with args.
 func runVerifyHarness(t *testing.T, args []string, pageHandler http.HandlerFunc, depBodyFn func(string) map[string]any) (h *verifyHarness, stdout, stderr *bytes.Buffer, exit int) {
 	t.Helper()
 	h = newVerifyHarness(t, pageHandler, depBodyFn)
 	stdout, stderr = &bytes.Buffer{}, &bytes.Buffer{}
-	exit = runVerify(context.Background(), append(args, "7"), stdout, stderr)
+	exit = runVerify(context.Background(), append(args, "production"), stdout, stderr)
 	return h, stdout, stderr, exit
 }
 
@@ -578,7 +593,7 @@ func TestRunVerify_EnrichesTheRecordedAssertion(t *testing.T) {
 func TestRunVerify_MismatchIsDriftExitThree(t *testing.T) {
 	wrong := strings.Replace(verifyPage("b-1"), `build-id" content="b-1"`, `build-id" content="someone-elses-build"`, 1)
 	handler := func(w http.ResponseWriter, r *http.Request) { w.Write([]byte(wrong)) }
-	h, stdout, stderr, code := runVerifyHarness(t, nil, handler, func(u string) map[string]any { return deploymentBody(&u) })
+	h, stdout, _, code := runVerifyHarness(t, nil, handler, func(u string) map[string]any { return deploymentBody(&u) })
 
 	if code != 3 {
 		t.Errorf("exit code = %d, want 3 (the drift signal)", code)
@@ -586,7 +601,6 @@ func TestRunVerify_MismatchIsDriftExitThree(t *testing.T) {
 	if out := stdout.String(); !strings.Contains(out, "DRIFT") || !strings.Contains(out, "b-1") || !strings.Contains(out, "someone-elses-build") {
 		t.Errorf("stdout = %q, want a DRIFT line naming expected and observed builds", out)
 	}
-	_ = stderr
 	if len(h.verifications) != 1 {
 		t.Fatalf("mismatch was not recorded before exiting (%d rows)", len(h.verifications))
 	}
@@ -644,7 +658,9 @@ func TestRunVerify_BestEffortSwallowsFetchFailure(t *testing.T) {
 }
 
 func TestRunVerify_ParseFailureIsRecordedThenExitsOne(t *testing.T) {
-	junk := func(w http.ResponseWriter, r *http.Request) { w.Write([]byte("<html><body>not a build-info file</body></html>")) }
+	junk := func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte("<html><body>not a build-info file</body></html>"))
+	}
 	h, _, _, code := runVerifyHarness(t, nil, junk, func(u string) map[string]any { return deploymentBody(&u) })
 
 	if code != 1 {
@@ -689,13 +705,12 @@ func TestRunVerify_DeploymentWithoutURLNeedsTheFlag(t *testing.T) {
 	if len(h.verifications) != 0 {
 		t.Errorf("nothing should be recorded when there is nothing to check (%d rows)", len(h.verifications))
 	}
-	_ = h
 }
 
 func TestRunVerify_URLOverrideRescuesURLlessDeployment(t *testing.T) {
 	h := newVerifyHarness(t, nil, nil)
 	stdout, stderr := &bytes.Buffer{}, &bytes.Buffer{}
-	code := runVerify(context.Background(), []string{"-url", h.page.URL + "/build-info.html", "7"}, stdout, stderr)
+	code := runVerify(context.Background(), []string{"-url", h.page.URL + "/build-info.html", "production"}, stdout, stderr)
 	if code != 0 {
 		t.Fatalf("exit code = %d, want 0 (stderr: %s)", code, stderr.String())
 	}
@@ -714,7 +729,7 @@ func TestRunVerify_DeployedURLWinsOverConflictingFlag(t *testing.T) {
 		return deploymentBody(&recorded)
 	})
 	stdout, stderr := &bytes.Buffer{}, &bytes.Buffer{}
-	code := runVerify(context.Background(), []string{"-url", "https://elsewhere.example.test/build-info.html", "7"}, stdout, stderr)
+	code := runVerify(context.Background(), []string{"-url", "https://elsewhere.example.test/build-info.html", "production"}, stdout, stderr)
 
 	if code != 0 {
 		t.Fatalf("exit code = %d, want 0 (stderr: %s)", code, stderr.String())
@@ -728,27 +743,23 @@ func TestRunVerify_DeployedURLWinsOverConflictingFlag(t *testing.T) {
 	}
 }
 
-func TestRunVerify_GetDeploymentNotFoundGuidanceAndNoRecording(t *testing.T) {
+func TestRunVerify_UnknownEnvironmentFailsWithGuidanceAndNoRecording(t *testing.T) {
 	h := newVerifyHarness(t, nil, nil)
-	// Point the API stub at a not_found deployment response by rebuilding
-	// its behavior here: simplest is to reuse the harness but assert the
-	// guidance path through getDeploymentError below for the message, and
-	// drive the flow with a dedicated stub.
 	api404 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNotFound)
 		json.NewEncoder(w).Encode(map[string]any{
-			"error": map[string]any{"code": "not_found", "message": "no such deployment."},
+			"error": map[string]any{"code": "not_found", "message": "nothing verifiable under that coordinate."},
 		})
 	}))
 	defer api404.Close()
 	t.Setenv("DRIFTMAPPER_API_URL", api404.URL)
 
 	var stdout, stderr bytes.Buffer
-	code := runVerify(context.Background(), []string{"99"}, &stdout, &stderr)
+	code := runVerify(context.Background(), []string{"prodction"}, &stdout, &stderr)
 	if code != 1 {
 		t.Errorf("exit code = %d, want 1", code)
 	}
-	for _, want := range []string{"resolve deployment 99", "deploy step", "verify binding"} {
+	for _, want := range []string{`environment "prodction"`, "deploy step"} {
 		if !strings.Contains(stderr.String(), want) {
 			t.Errorf("stderr = %q, want it to contain %q", stderr.String(), want)
 		}
@@ -758,19 +769,24 @@ func TestRunVerify_GetDeploymentNotFoundGuidanceAndNoRecording(t *testing.T) {
 	}
 }
 
-func TestRunVerify_RejectsNonNumericDeploymentID(t *testing.T) {
-	stdout, stderr := &bytes.Buffer{}, &bytes.Buffer{}
-	code := runVerify(context.Background(), []string{"abc123"}, stdout, stderr)
-	if code != 2 {
-		t.Errorf("exit code = %d, want 2 (usage error)", code)
-	}
-	if !strings.Contains(stderr.String(), "positive integer") {
-		t.Errorf("stderr = %q, want guidance about numeric deployment ids", stderr.String())
+func TestRunVerify_RejectsMalformedEnvironment(t *testing.T) {
+	// Note: no leading-hyphen cases here — flag.Parse consumes those as
+	// flags before positional validation ever runs ("flag provided but not
+	// defined"), which is its own usage error.
+	for _, bad := range []string{"Prod_1", "prod/", ".", strings.Repeat("p", 64)} {
+		stdout, stderr := &bytes.Buffer{}, &bytes.Buffer{}
+		code := runVerify(context.Background(), []string{bad}, stdout, stderr)
+		if code != 2 {
+			t.Errorf("runVerify(%q) exit code = %d, want 2 (usage error)", bad, code)
+		}
+		if !strings.Contains(stderr.String(), "lowercase alphanumeric") {
+			t.Errorf("stderr = %q, want the environment slug rule", stderr.String())
+		}
 	}
 }
 
 func TestRunVerify_RequiresExactlyOneArgument(t *testing.T) {
-	for _, args := range [][]string{nil, {"7", "stray"}} {
+	for _, args := range [][]string{nil, {"production", "stray"}} {
 		stdout, stderr := &bytes.Buffer{}, &bytes.Buffer{}
 		if code := runVerify(context.Background(), args, stdout, stderr); code != 2 {
 			t.Errorf("runVerify(%v) exit code = %d, want 2", args, code)
@@ -778,28 +794,86 @@ func TestRunVerify_RequiresExactlyOneArgument(t *testing.T) {
 	}
 }
 
-func TestGetDeploymentError_NoLivePolicyGetsActionableGuidance(t *testing.T) {
-	err := getDeploymentError(7, &apiclient.Error{
+func TestRunVerify_CrossRepoFlagReachesTheAPIQuery(t *testing.T) {
+	h, _, _, code := runVerifyHarness(t, []string{"-repo", "acme/checkout"}, nil, func(u string) map[string]any { return deploymentBody(&u) })
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0", code)
+	}
+	if len(h.repos) != 1 || h.repos[0] != "acme/checkout" {
+		t.Errorf("repo query params = %v, want exactly [acme/checkout]", h.repos)
+	}
+	if len(h.verifications) != 1 {
+		t.Fatalf("recorded %d verifications, want exactly 1", len(h.verifications))
+	}
+}
+
+func TestRunVerify_MismatchExitsThreeEvenWhenRecordingFails(t *testing.T) {
+	for _, bestEffort := range []bool{false, true} {
+		wrong := strings.Replace(verifyPage("b-1"), `content="b-1"`, `content="someone-elses-build"`, 1)
+		handler := func(w http.ResponseWriter, r *http.Request) { w.Write([]byte(wrong)) }
+		h := newVerifyHarness(t, handler, func(u string) map[string]any { return deploymentBody(&u) })
+		h.failVerifications = true
+
+		args := []string{"production"}
+		if bestEffort {
+			args = []string{"-best-effort", "production"}
+		}
+		stdout, stderr := &bytes.Buffer{}, &bytes.Buffer{}
+		code := runVerify(context.Background(), args, stdout, stderr)
+
+		if code != 3 {
+			t.Errorf("best-effort=%v: exit code = %d, want 3 (drift outranks an API outage; stderr: %s)", bestEffort, code, stderr.String())
+		}
+		if out := stdout.String(); !strings.Contains(out, "DRIFT") || !strings.Contains(out, "(recording failed)") {
+			t.Errorf("stdout = %q, want the DRIFT line even though the row did not land", out)
+		}
+		if !strings.Contains(stderr.String(), "record verification") {
+			t.Errorf("stderr = %q, want the record failure surfaced too", stderr.String())
+		}
+		if len(h.verifications) != 0 {
+			t.Errorf("recorded %d rows, want 0 (the stub is down)", len(h.verifications))
+		}
+	}
+}
+
+func TestResolveDeploymentError_NoLivePolicyGetsActionableGuidance(t *testing.T) {
+	err := resolveDeploymentError("", "production", &apiclient.Error{
 		StatusCode: http.StatusForbidden,
 		Code:       "no_live_policy",
 		Message:    "This repository has no live trusted-workload policy.",
 	})
-	for _, want := range []string{"resolve deployment 7", "Add a repository", "DRIFTMAPPER_CHALLENGE"} {
+	for _, want := range []string{`environment "production"`, "Add a repository", "DRIFTMAPPER_CHALLENGE"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("err = %q, want it to contain %q", err.Error(), want)
 		}
 	}
 }
 
-func TestGetDeploymentError_NotFoundNamesAllCollapsedCases(t *testing.T) {
-	err := getDeploymentError(7, &apiclient.Error{
+func TestResolveDeploymentError_OwnRepoNotFoundNamesTheTypedEnvironment(t *testing.T) {
+	err := resolveDeploymentError("", "prodction", &apiclient.Error{
 		StatusCode: http.StatusNotFound,
 		Code:       "not_found",
-		Message:    "no such deployment.",
+		Message:    "nothing verifiable under that coordinate.",
 	})
-	for _, want := range []string{"resolve deployment 7", "deploy step", "verify binding"} {
+	for _, want := range []string{`environment "prodction"`, "deploy step"} {
 		if !strings.Contains(err.Error(), want) {
-			t.Errorf("err = %q, want it to contain %q (existence hiding collapses three causes)", err.Error(), want)
+			t.Errorf("err = %q, want it to contain %q (existence hiding collapses the causes; the typed name is the fix loop)", err.Error(), want)
+		}
+	}
+	if strings.Contains(err.Error(), "verify binding") {
+		t.Errorf("err = %q, want no binding guidance for an own-repository read", err.Error())
+	}
+}
+
+func TestResolveDeploymentError_CrossRepoNotFoundNamesBindingAndTarget(t *testing.T) {
+	err := resolveDeploymentError("acme/checkout", "staging", &apiclient.Error{
+		StatusCode: http.StatusNotFound,
+		Code:       "not_found",
+		Message:    "nothing verifiable under that coordinate.",
+	})
+	for _, want := range []string{"acme/checkout", `"staging"`, "deploy step", "verify binding"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("err = %q, want it to contain %q (existence hiding collapses four causes; the message names all recoverable ones)", err.Error(), want)
 		}
 	}
 }

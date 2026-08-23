@@ -3,10 +3,11 @@
 The Driftmapper CLI: registers a build from inside your CI so Driftmapper can track it.
 The default action is write-only — it acquires a workload OIDC token, calls `POST
 /v1/builds`, and writes `build-info.html`. Three other subcommands: `deploy` (below) records
-that a registered build is now deployed to an environment; `verify` (below) checks a
-deployment against reality — it fetches the deployed `build-info.html`, records what it
-found, and exits 3 on a mismatch; and `compare` (below) is a browser launcher with zero
-network calls of its own, not a read command. All three use the same workload OIDC token.
+that a registered build is now deployed to an environment; `verify` (below) checks what's
+*currently deployed* to an environment against reality — it fetches the deployed
+`build-info.html`, records what it found, and exits 3 on a mismatch; and `compare` (below) is
+a browser launcher with zero network calls of its own, not a read command. All three use the
+same workload OIDC token.
 
 ## Install and use
 
@@ -112,10 +113,9 @@ jobs:
 (Here `image_tag` is assumed to be the commit SHA the image was built from — adjust to
 however your build tags images if that's not the case.)
 
-Pass `-url=<target>` with the deployed `build-info.html`'s URL when you can — it's what makes
-the deployment verifiable by handle alone (`verify <deployment-id>` fetches exactly that URL).
-The deploy output prints the deployment ID to pass to `verify`; a deployment recorded without
-a `-url` can still be verified by supplying the target there instead.
+Pass `-url=<target>` with the deployed `build-info.html`'s URL when you can — recording it is
+what lets `verify` run later with nothing but the environment name. A deployment recorded
+without a `-url` can still be verified by supplying the target there instead.
 
 It's a second, explicit CI step on purpose — a deploy happens every time you deploy, not
 once like a repository binding, so it isn't folded into the default action the way
@@ -138,36 +138,45 @@ doesn't require any CI changes.
 permissions:
   id-token: write   # required — same OIDC token as registration
 steps:
+  # in your deploy workflow:
   - run: npx @driftmapper/cli deploy -env=production -url=${{ steps.deploy.outputs.url }} ...
-  - run: npx @driftmapper/cli verify <deployment-id>   # the number `deploy` printed
+  # anywhere later — including its own scheduled workflow:
+  - run: npx @driftmapper/cli verify production
 ```
 
-You build an artifact, you deploy an artifact, you verify a *deployment*: `verify` takes the
-deployment row ID its `deploy` step printed, resolves what that row claims (build, environment,
-and — when recorded with `-url` on deploy — where to look), fetches that URL itself, parses the
-deployed `build-info.html` meta tags, and records **what it actually found**:
+You build an artifact, you deploy an artifact, you verify what's *currently deployed*.
+`verify` takes the environment name your deploy step already used — a constant that requires
+nothing captured between steps — resolves the newest claim for that repository + environment,
+fetches its recorded `build-info.html`, parses the meta tags, and records **what it actually
+found**:
 
 - observed == expected → recorded as `verified`, exit 0.
 - observed ≠ expected → recorded as a `mismatch` and **exit 3**. This is the drift signal,
-  delivered to your pipeline the moment it's observable — not an error, and never swallowed by
-  `-best-effort`.
+  not an error, and never swallowed by `-best-effort`.
 - unreachable or unparsable target → still recorded (`fetch_failed` / `parse_failed`; failed
   observations are assertions too), then exit 1 — or exit 0 under `-best-effort`.
+
+Environments need no pre-registration: the name comes into existence when your first
+`deploy -env=<name>` claims it, and `verify` must spell it identically — a typo'd name fails
+fast with the exact string you typed in the error.
+
+Because drift exits non-zero, CI itself is the MVP alarm surface: put `verify` on a schedule
+(`schedule:` cron) and GitHub Actions notifies subscribers the moment a run goes red. A
+monitoring job that should stay green while it works can set `continue-on-error: true` on the
+step — verification still runs and every outcome still lands in the ledger.
+
+Flags: `-repo=<owner/name>` verifies another repository's environment (e.g. an e2e repo
+checking the deployer after its own tests) — this needs an admin/owner to establish a `verify`
+binding between the two repositories from the dashboard; `-url=<target>` supplies the fetch
+target only for deployments recorded without one; `-header='Name: value'` (repeatable)
+authenticates against targets behind e.g. a staging gateway — values are stripped automatically
+if a redirect leaves the original host; and `-best-effort` covers outages only.
 
 Driftmapper-the-service still never fetches your environment (the fetch runs here, in your own
 CI); "verified" additionally remains a read-time comparison of the latest deploy vs. verify
 claims in the dashboard's assertion timeline.
 
-Flags: `-url=<target>` supplies the fetch target only for deployments recorded without one;
-`-header='Name: value'` (repeatable) authenticates against targets behind e.g. a staging
-gateway — values are stripped automatically if a redirect leaves the original host; and
-`-best-effort` covers outages only.
-
-It stays deliberately a separate CI step so a different identity can verify — e.g. an
-e2e-test repo (not the deployer) checking after its own checks. Same-repo verification is
-ungated; a separate repo verifying another repo's deployments needs an admin/owner to
-establish a `verify` binding between them from the dashboard. Rerunning the same CI run is a
-harmless no-op.
+Rerunning the same CI run is a harmless no-op.
 
 ### Environment variables
 
