@@ -151,20 +151,47 @@ func (c *Client) recordDeploymentOnce(ctx context.Context, commitSHA, environmen
 	return deployment, status == http.StatusCreated, nil
 }
 
-// RecordVerification calls POST /v1/verifications (spec's Assertion/Binding
-// model, DRFT-96) — records that this identity asserts buildInstanceID was
-// observed live in environment. A pure write, exactly like
-// RecordDeployment: no fetch, no comparison against reality; the
-// build-instance id is read off the deployed build-info.html by the
-// caller's own pipeline and passed directly (unlike deploy, which resolves
-// a commit). created is false when the server returned 200 (an identical
-// retry, same CI run, hit the dedupe key), true on 201.
+// GetCurrentDeployment calls GET /v1/deployments/current (DRFT-98) — the
+// read half of deployment-keyed verification: `driftmapper verify
+// <environment>` names a constant its own deploy step already used and
+// needs what that environment's current deployment row carries (expected
+// build-instance id, recorded url). The server defines "currently
+// deployed" as the newest kind='deploy' row for (repository_id,
+// environment) by created_at — never anything client-supplied.
+//
+// targetRepo is empty to read the token's own repository; non-empty
+// (`owner/name`) it targets another repository's environment, which
+// requires an admin-created kind='verify' binding — without one the 404 is
+// deliberately indistinguishable from an empty coordinate (existence
+// hiding), so callers cannot probe other repositories' environments.
+func (c *Client) GetCurrentDeployment(ctx context.Context, targetRepo, environment string) (deployment protocol.Deployment, err error) {
+	q := url.Values{"env": []string{environment}}
+	if targetRepo != "" {
+		q.Set("repo", targetRepo)
+	}
+	data, status, err := c.do(ctx, http.MethodGet, "/v1/deployments/current?"+q.Encode(), nil, http.StatusOK)
+	if err != nil {
+		return protocol.Deployment{}, err
+	}
+	if err := json.Unmarshal(data, &deployment); err != nil {
+		return protocol.Deployment{}, fmt.Errorf("decode deployment (status %d): %w", status, err)
+	}
+	return deployment, nil
+}
+
+// RecordVerification calls POST /v1/verifications. The enriched request
+// (DRFT-98) records what an opinionated caller observed: deployment_id
+// provenance, source_url fetched, observed_build_instance_id parsed from
+// the deployed meta tags, and outcome (verified/mismatch/fetch_failed/
+// parse_failed). A bare attestation sends only the required pair.
+// created is false when the server returned 200 (an identical retry,
+// same CI run, hit the dedupe key), true on 201.
 //
 // Retries transient failures per deployRetryBackoff; a genuine 4xx is
 // permanent and returned on the first attempt, never retried.
-func (c *Client) RecordVerification(ctx context.Context, buildInstanceID, environment string) (verification protocol.Verification, created bool, err error) {
+func (c *Client) RecordVerification(ctx context.Context, req protocol.VerificationRequest) (verification protocol.Verification, created bool, err error) {
 	for attempt := 0; ; attempt++ {
-		verification, created, err = c.recordVerificationOnce(ctx, buildInstanceID, environment)
+		verification, created, err = c.recordVerificationOnce(ctx, req)
 		if err == nil || !isTransient(err) || attempt >= len(deployRetryBackoff) {
 			return verification, created, err
 		}
@@ -176,11 +203,8 @@ func (c *Client) RecordVerification(ctx context.Context, buildInstanceID, enviro
 	}
 }
 
-func (c *Client) recordVerificationOnce(ctx context.Context, buildInstanceID, environment string) (verification protocol.Verification, created bool, err error) {
-	data, status, err := c.doJSON(ctx, "/v1/verifications", protocol.VerificationRequest{
-		BuildInstanceId: buildInstanceID,
-		Environment:     environment,
-	}, http.StatusOK, http.StatusCreated)
+func (c *Client) recordVerificationOnce(ctx context.Context, req protocol.VerificationRequest) (verification protocol.Verification, created bool, err error) {
+	data, status, err := c.doJSON(ctx, "/v1/verifications", req, http.StatusOK, http.StatusCreated)
 	if err != nil {
 		return protocol.Verification{}, false, err
 	}
@@ -211,17 +235,27 @@ func isTransient(err error) bool {
 // success it returns the raw `data` field for the caller to unmarshal into
 // its own operation-specific type.
 func (c *Client) doJSON(ctx context.Context, path string, body any, okStatuses ...int) (data json.RawMessage, status int, err error) {
-	reqBody, err := json.Marshal(body)
-	if err != nil {
-		return nil, 0, fmt.Errorf("marshal request: %w", err)
+	return c.do(ctx, http.MethodPost, path, body, okStatuses...)
+}
+
+func (c *Client) do(ctx context.Context, method, path string, body any, okStatuses ...int) (data json.RawMessage, status int, err error) {
+	var reqBody io.Reader
+	if body != nil {
+		marshaled, err := json.Marshal(body)
+		if err != nil {
+			return nil, 0, fmt.Errorf("marshal request: %w", err)
+		}
+		reqBody = bytes.NewReader(marshaled)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+path, bytes.NewReader(reqBody))
+	req, err := http.NewRequestWithContext(ctx, method, c.baseURL+path, reqBody)
 	if err != nil {
 		return nil, 0, err
 	}
-	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+c.token)
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
 
 	resp, err := c.http.Do(req)
 	if err != nil {

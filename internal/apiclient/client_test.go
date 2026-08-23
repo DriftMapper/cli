@@ -398,3 +398,200 @@ func TestAuthorizeRepository_ErrorCodes(t *testing.T) {
 		})
 	}
 }
+
+// --- getCurrentDeployment + enriched recordVerification (DRFT-98) -------
+
+func TestGetCurrentDeployment_Success(t *testing.T) {
+	recordedURL := "https://prod.example.test/build-info.html"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Method; got != http.MethodGet {
+			t.Errorf("method = %q, want GET", got)
+		}
+		if got := r.URL.Path; got != "/v1/deployments/current" {
+			t.Errorf("path = %q, want /v1/deployments/current", got)
+		}
+		if got := r.URL.Query().Get("env"); got != "production" {
+			t.Errorf("env = %q, want production", got)
+		}
+		if got := r.URL.Query().Get("repo"); got != "" {
+			t.Errorf("repo = %q, want absent for own-repository reads", got)
+		}
+		if got := r.Header.Get("Authorization"); got != "Bearer tok" {
+			t.Errorf("Authorization = %q, want %q", got, "Bearer tok")
+		}
+		json.NewEncoder(w).Encode(map[string]any{
+			"data": protocol.Deployment{
+				Id:              7,
+				Kind:            protocol.Deploy,
+				BuildInstanceId: "b-1",
+				Environment:     "production",
+				Url:             &recordedURL,
+			},
+		})
+	}))
+	defer srv.Close()
+
+	client := New(srv.URL, "tok")
+	deployment, err := client.GetCurrentDeployment(context.Background(), "", "production")
+	if err != nil {
+		t.Fatalf("GetCurrentDeployment: %v", err)
+	}
+	if deployment.BuildInstanceId != "b-1" || deployment.Environment != "production" {
+		t.Errorf("deployment = %+v, want build b-1 in production", deployment)
+	}
+	if deployment.Url == nil || *deployment.Url != recordedURL {
+		t.Errorf("url = %v, want %q", deployment.Url, recordedURL)
+	}
+	if deployment.Kind != protocol.Deploy {
+		t.Errorf("kind = %q, want deploy", deployment.Kind)
+	}
+}
+
+func TestGetCurrentDeployment_PassesTargetRepoThrough(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.URL.Query().Get("repo"); got != "acme/checkout" {
+			t.Errorf("repo = %q, want acme/checkout (cross-repo verification)", got)
+		}
+		if got := r.URL.Query().Get("env"); got != "staging" {
+			t.Errorf("env = %q, want staging", got)
+		}
+		json.NewEncoder(w).Encode(map[string]any{
+			"data": protocol.Deployment{Id: 9, Kind: protocol.Deploy, BuildInstanceId: "b-2", Environment: "staging"},
+		})
+	}))
+	defer srv.Close()
+
+	client := New(srv.URL, "tok")
+	deployment, err := client.GetCurrentDeployment(context.Background(), "acme/checkout", "staging")
+	if err != nil {
+		t.Fatalf("GetCurrentDeployment: %v", err)
+	}
+	if deployment.BuildInstanceId != "b-2" {
+		t.Errorf("build_instance_id = %q, want b-2", deployment.BuildInstanceId)
+	}
+}
+
+func TestGetCurrentDeployment_ErrorCodesArePermanent(t *testing.T) {
+	var requests int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		w.WriteHeader(http.StatusNotFound)
+		json.NewEncoder(w).Encode(map[string]any{
+			"error": map[string]any{"code": "not_found", "message": "nothing verifiable under that coordinate."},
+		})
+	}))
+	defer srv.Close()
+
+	client := New(srv.URL, "tok")
+	_, err := client.GetCurrentDeployment(context.Background(), "", "prodction")
+	apiErr, ok := err.(*Error)
+	if !ok {
+		t.Fatalf("err is %T, want *apiclient.Error", err)
+	}
+	if apiErr.Code != "not_found" || apiErr.StatusCode != http.StatusNotFound {
+		t.Errorf("err = %+v, want not_found/404", apiErr)
+	}
+	if requests != 1 {
+		t.Errorf("requests = %d, want 1 (reads are never retried)", requests)
+	}
+}
+
+func TestRecordVerification_EnrichedRequestRoundTrips(t *testing.T) {
+	var got protocol.VerificationRequest
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
+			t.Errorf("decode body: %v", err)
+		}
+		w.WriteHeader(http.StatusCreated)
+		json.NewEncoder(w).Encode(map[string]any{
+			"data": protocol.Verification{BuildInstanceId: got.BuildInstanceId, Environment: got.Environment},
+		})
+	}))
+	defer srv.Close()
+
+	deploymentID := int64(7)
+	source := "https://prod.example.test/build-info.html"
+	observed := "observed-build"
+	mismatch := protocol.VerificationRequestOutcomeMismatch
+	client := New(srv.URL, "tok")
+	_, created, err := client.RecordVerification(context.Background(), protocol.VerificationRequest{
+		BuildInstanceId:         "b-1",
+		Environment:             "production",
+		DeploymentId:            &deploymentID,
+		SourceUrl:               &source,
+		ObservedBuildInstanceId: &observed,
+		Outcome:                 &mismatch,
+	})
+	if err != nil {
+		t.Fatalf("RecordVerification: %v", err)
+	}
+	if !created {
+		t.Error("created = false, want true (201)")
+	}
+	if got.BuildInstanceId != "b-1" || got.Environment != "production" {
+		t.Errorf("required pair = %+v, want b-1/production", got)
+	}
+	if got.DeploymentId == nil || *got.DeploymentId != 7 {
+		t.Errorf("deployment_id = %v, want 7", got.DeploymentId)
+	}
+	if got.SourceUrl == nil || *got.SourceUrl != source {
+		t.Errorf("source_url = %v, want %q", got.SourceUrl, source)
+	}
+	if got.ObservedBuildInstanceId == nil || *got.ObservedBuildInstanceId != observed {
+		t.Errorf("observed_build_instance_id = %v, want %q", got.ObservedBuildInstanceId, observed)
+	}
+	if got.Outcome == nil || *got.Outcome != mismatch {
+		t.Errorf("outcome = %v, want mismatch", got.Outcome)
+	}
+}
+
+func TestRecordVerification_BareAttestationOmitsOptionalFields(t *testing.T) {
+	var raw map[string]json.RawMessage
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewDecoder(r.Body).Decode(&raw)
+		w.WriteHeader(http.StatusCreated)
+		json.NewEncoder(w).Encode(map[string]any{"data": protocol.Verification{}})
+	}))
+	defer srv.Close()
+
+	client := New(srv.URL, "tok")
+	_, _, err := client.RecordVerification(context.Background(), protocol.VerificationRequest{
+		BuildInstanceId: "b-1",
+		Environment:     "production",
+	})
+	if err != nil {
+		t.Fatalf("RecordVerification: %v", err)
+	}
+	for _, field := range []string{"deployment_id", "source_url", "observed_build_instance_id", "outcome"} {
+		if _, present := raw[field]; present {
+			t.Errorf("bare attestation sent %q; optional fields must stay absent so old servers accept it", field)
+		}
+	}
+}
+
+func TestRecordVerification_RetriesOn5xxThenSucceeds(t *testing.T) {
+	withFastDeployRetries(t)
+	var requests int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		if requests < 2 {
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(map[string]any{"error": map[string]any{"code": "internal", "message": "boom"}})
+			return
+		}
+		w.WriteHeader(http.StatusCreated)
+		json.NewEncoder(w).Encode(map[string]any{"data": protocol.Verification{BuildInstanceId: "b-1"}})
+	}))
+	defer srv.Close()
+
+	client := New(srv.URL, "tok")
+	_, created, err := client.RecordVerification(context.Background(), protocol.VerificationRequest{
+		BuildInstanceId: "b-1", Environment: "production",
+	})
+	if err != nil || !created {
+		t.Fatalf("RecordVerification = (%t, %v), want created on the retry", created, err)
+	}
+	if requests != 2 {
+		t.Errorf("requests = %d, want 2 (one transient failure then success)", requests)
+	}
+}

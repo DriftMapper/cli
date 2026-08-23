@@ -12,13 +12,15 @@ workload OIDC token, `POST /v1/builds`, write `build-info.html` from the respons
 the repository to an org — before registering; still a write, not a read. See "Gotcha —
 challenge redemption is folded into the default action, not a separate command" below.
 
-`compare` (spec DRFT-50, superseding DRFT-26) is a pure browser launcher for the
-SPA compare view (DRFT-29, `driftmapper/static`), with zero network calls of
+`compare` (spec DRFT-50, superseding DRFT-26) is a pure browser launcher for
+the SPA compare view (DRFT-29, `driftmapper/static`), with zero network calls of
 its own. See "Gotcha — `compare` is a browser launcher, not a read command" below.
-`deploy` (DRFT-88) and `verify` (DRFT-96) are the two additional write
-subcommands — CI steps that record a deploy-mark or a verify assertion on
-the same OIDC identity, dispatched the same way `compare` is. All three stay
-writes (or no-op hand-offs); nothing here reads from the API.
+`deploy` (DRFT-88) records deploy-marks; `verify` (DRFT-98) is the one
+opinionated checker — it resolves what's currently deployed to a named
+environment via `GET /v1/deployments/current` (this repo's first API read,
+deliberate), fetches that deployment's recorded URL,
+parses it with internal/buildinfo's parser, and records what it found. Both are
+CI steps on the same OIDC identity as register, dispatched like `compare`.
 
 Distributed via npm (`npx @driftmapper/cli`) with per-platform binaries resolved through npm's
 `os`/`cpu` fields as `optionalDependencies`, plus raw binaries on GitHub Releases as a fallback
@@ -78,14 +80,23 @@ internal/
                           are deliberately NOT here; they're token-derived and the server
                           rejects them if present in the body
   buildinfo/               generates build-info.html (spec §2.3) as a pure function of one
-                          server response — no server call. The one derived value is the
-                          click-only sign-in link (DRFT-52): `/login?next=<resolution
-                          path>` on resolution_url's own origin, not a server-provided
-                          field. No read side as of DRFT-50 — see the compare/ entry below
-  apiclient/               client for the CLI's public-tier operations — POST /v1/builds
-                          and POST /v1/repositories/authorize (DRFT-66) — sharing one
-                          {"data"}/{"error"} envelope-unwrapping helper (doJSON), per
-                          driftmapper/protocol's openapi.yaml
+                           server response — no server call. The one derived value is the
+                           click-only sign-in link (DRFT-52): `/login?next=<resolution
+                           path>` on resolution_url's own origin, not a server-provided
+                           field. Parse (DRFT-98) reads the same format back — the
+                           format's first-party reference parser, stdlib-only; producer
+                           and parser live in one package so they cannot drift
+  apiclient/               client for the CLI's public-tier operations — POST /v1/builds,
+                           POST /v1/repositories/authorize (DRFT-66), POST /v1/deployments,
+                           GET/POST for deployments+verifications (DRFT-96/98) — sharing one
+                           {"data"}/{"error"} envelope-unwrapping helper (doJSON/do), per
+                           driftmapper/protocol's openapi.yaml
+  sitefetch/               verify's opinionated GET of a customer-deployed URL: https-only
+                           on every hop, custom -header values stripped on cross-origin
+                           redirect, 15s/1MiB/hop-cap budgets, 200-or-typed-error.
+                           Deliberately no SSRF machinery — the operator's own machine
+                           fetching the operator's own URL crosses no privilege boundary;
+                           that posture belongs to the server-side poller
   compare/                 `driftmapper compare`'s URL-building logic (spec DRFT-50) —
                           OpenURL builds the SPA compare view URL from two build-instance
                           IDs the caller already supplied, per that view's own URL
@@ -250,3 +261,55 @@ live attack vector for Shai-Hulud-style npm supply-chain worms. Consequence, and
 safe to promise: `ignore-scripts=true` environments work completely unmodified, since nothing
 ever needs to execute to fetch a binary — the platform binary arrives as an ordinary
 `optionalDependency` tarball, same as any other npm package.
+
+## Gotcha — "nothing here reads from the API" died with DRFT-98, on purpose
+
+The founding posture was writes-only; `verify` now calls `GET
+/v1/deployments/current` before recording anything. This is the deliberate
+exception, not drift to revert: the read is keyed by an environment name the
+caller's own deploy step minted (plus an optional `-repo=owner/name` for
+cross-repo verification under an admin-created binding), authorization and
+existence-hiding are identical to the write path, and it is what makes
+deployment-keyed verification possible (`driftmapper verify <environment>`
+needs the row's expected build and recorded URL). DRFT-27 is untouched by
+this — the *server* still fetches nothing; the fetch lives in
+`internal/sitefetch`, on the customer's own CI machine. Don't add other API
+reads without the same justification.
+
+## Gotcha — environments are minted at deploy time; there is no pre-registration
+
+An environment name comes into existence when the first `deploy -env=<name>`
+claims it — free-text, scoped to one repository, DNS-label-shaped
+(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`). Nothing anywhere creates one in
+advance, so `verify <environment>` must spell exactly what the deploy step
+used: a well-formed but unknown name is an empty coordinate, and the server's
+404 for it is deliberately indistinguishable from a missing binding. That's
+why verify echoes the typed string back in its error — the fix loop is "read
+your deploy step's -env" — and why there is deliberately no environments-list
+endpoint to lean on. The dashboard's distinct-environment list is where a
+typo'd near-duplicate (`prod` vs `production`) becomes visible on sight.
+
+## Gotcha — verify's exit codes are a contract: 3 means drift, not failure
+
+`verify` exits 0 verified, 1 operational/failed-check, 2 usage, **3 mismatch**.
+A mismatch always exits 3 — even when an API outage prevented its row from
+landing (the DRIFT line prints regardless, and the record error surfaces on
+stderr). `-best-effort` swallows outages only — never a mismatch (that would
+erase the product's entire signal from pipelines that use the flag). Scripts
+and the future GitHub Action branch on 3 vs 1 to separate "your deployment
+drifted" from "the tool couldn't run"; scheduled monitors that want green-while-working
+silence 3 with `continue-on-error`, keeping CI as the MVP alarm surface.
+Changing any of this is a breaking release.
+
+## Principle — orthogonal packages, opinionated commands
+
+The primitive operations live as independent packages: resolve
+(`apiclient.GetCurrentDeployment`), observe (`sitefetch` + `buildinfo.Parse`), compare,
+record (`apiclient.RecordVerification`). Commands are thin compositions of them:
+`deploy` = resolve ∘ record; `verify` = resolve ∘ observe ∘ compare ∘ record.
+The overlap between the two commands is the point — both write rows into one
+assertions ledger; that's the domain model, not duplication. Do not expose the
+seams as flags (`--no-record`, a generic `assert --kind=`) or grow a third way to
+compose them without a third assertion kind existing. The sanctioned future seam
+for exposing observe alone is a read-only `probe <url>` command, deliberately
+deferred.
