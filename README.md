@@ -182,7 +182,7 @@ Rerunning the same CI run is a harmless no-op.
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `DRIFTMAPPER_API_URL` | `https://api.driftmapper.com` | API base URL |
+| `DRIFTMAPPER_API_URL` | `https://api.driftmapper.io` | API base URL |
 | `DRIFTMAPPER_OIDC_AUDIENCE` | `https://driftmapper.com` | `aud` claim requested from the CI provider |
 | `DRIFTMAPPER_BUILD_INFO_FILE` | `build-info.html` | Output path (overridable per-run via `--output`) |
 | `DRIFTMAPPER_DASHBOARD_URL` | — | Dashboard SPA origin `compare` opens (required for `compare`; no default) |
