@@ -117,7 +117,7 @@ func Generate(outputPath string, build protocol.Build) error {
 // (spec DRFT-52): the human link skips straight past the resolution page's
 // unauth tier — this file already shows everything that tier would — and
 // lands on sign-in with the resolution path queued up to redirect back to
-// afterward. `next` (not `returnTo`) matches cmd/web/internal/handler/
+// afterward. `next` (not `returnTo`) matches cmd/app/internal/handler/
 // auth.go's actual query param name.
 func loginURL(resolutionURL string) (string, error) {
 	u, err := url.Parse(resolutionURL)
