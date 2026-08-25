@@ -60,7 +60,7 @@ that happens to be.
 ### Comparing two builds
 
 ```bash
-DRIFTMAPPER_DASHBOARD_URL=https://app.driftmapper.com \
+DRIFTMAPPER_DASHBOARD_URL=https://app.driftmapper.io \
   driftmapper compare <build-instance-id-a> <build-instance-id-b>
 ```
 
