@@ -62,31 +62,16 @@ jobs:
             --generate-notes
 
       # CGO_ENABLED=0 means all six targets cross-compile from this one
-      # ubuntu runner — no per-OS matrix, no C toolchains.
-      - name: build and upload all six targets
+      # ubuntu runner — no per-OS matrix, no C toolchains. `make release-build`
+      # is the same target a maintainer runs locally for a bootstrap publish
+      # (see Makefile) — one implementation, not two that can drift apart.
+      - name: build all six targets
+        run: make release-build VERSION="${GITHUB_REF_NAME#v}"
+
+      - name: upload release assets
         env:
           GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          VERSION="${GITHUB_REF_NAME#v}"
-          LDFLAGS="-s -w -X main.version=${VERSION}"
-
-          for target in darwin-arm64 darwin-x64 linux-x64 linux-arm64 win32-x64 win32-arm64; do
-            os="${target%-*}"; arch="${target##*-}"
-            goos="$os"; [ "$os" = "win32" ] && goos="windows"
-            goarch="$arch"; [ "$arch" = "x64" ] && goarch="amd64"
-            asset="driftmapper-${target}"
-            [ "$goos" = "windows" ] && asset="${asset}.exe"
-
-            echo "::group::${target}"
-            CGO_ENABLED=0 GOOS="$goos" GOARCH="$goarch" \
-              go build -trimpath -ldflags="$LDFLAGS" -o "$asset" ./cmd/driftmapper
-            chmod +x "$asset"
-            sha256sum "$asset" > "${asset}.sha256"
-            echo "::endgroup::"
-
-            gh release upload "${{ github.ref_name }}" "$asset" "${asset}.sha256" --clobber
-          done
+        run: gh release upload "${{ github.ref_name }}" dist/* --clobber
 
   # Gated behind a repo variable rather than always running: a trusted
   # publisher can't be configured on npmjs.com for a package that doesn't
@@ -110,108 +95,23 @@ jobs:
           node-version: 24 # npm 11.x — required for trusted-publisher OIDC
           registry-url: "https://registry.npmjs.org"
 
-      # Platform packages publish first, and idempotently: if a previous
-      # run of this job died partway through, re-running the same tag must
-      # not fail on packages already published, or a partial matrix failure
-      # would strand an immutable half-release with no way to complete it.
-      - name: publish platform packages
+      - name: download release binaries
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          set -euo pipefail
-          VERSION="${GITHUB_REF_NAME#v}"
+          mkdir -p dist
+          gh release download "${{ github.ref_name }}" --dir dist --pattern 'driftmapper-*'
 
-          for target in darwin-arm64 darwin-x64 linux-x64 linux-arm64 win32-x64 win32-arm64; do
-            os="${target%-*}"
-            goos="$os"; [ "$os" = "win32" ] && goos="windows"
-            asset="driftmapper-${target}"
-            binname="driftmapper"
-            if [ "$goos" = "windows" ]; then
-              asset="${asset}.exe"
-              binname="driftmapper.exe"
-            fi
+      # publish-platforms/wait-platforms/publish-wrapper are the same
+      # Makefile targets a maintainer runs locally for a bootstrap publish —
+      # one implementation of the publish sequence, not two that can drift
+      # apart. See the targets' own comments in Makefile for the ordering
+      # and idempotency reasoning (mirrored in CLAUDE.md).
+      - name: publish platform packages
+        run: make publish-platforms VERSION="${GITHUB_REF_NAME#v}"
 
-            pkg_dir="npm/platforms/cli-${target}"
-            pkg_name="@driftmapper/cli-${target}"
-
-            if npm view "${pkg_name}@${VERSION}" version >/dev/null 2>&1; then
-              echo "${pkg_name}@${VERSION} already published — skipping"
-              continue
-            fi
-
-            echo "::group::${target}"
-
-            gh release download "${{ github.ref_name }}" \
-              --pattern "$asset" --pattern "${asset}.sha256" \
-              --dir "$pkg_dir/bin"
-
-            (cd "$pkg_dir/bin" && sha256sum -c "${asset}.sha256")
-            rm -f "$pkg_dir/bin/${asset}.sha256"
-
-            # gh release download and the upload-artifact-equivalent step
-            # above do not preserve the exec bit — it must be set explicitly,
-            # and since platform packages declare no `bin` field, npm will
-            # not chmod it at install time either. The tarball mode is all
-            # the end user gets.
-            mv "$pkg_dir/bin/$asset" "$pkg_dir/bin/$binname"
-            chmod +x "$pkg_dir/bin/$binname"
-
-            node -e "
-              const fs = require('fs');
-              const p = '$pkg_dir/package.json';
-              const pkg = JSON.parse(fs.readFileSync(p, 'utf-8'));
-              pkg.version = '$VERSION';
-              fs.writeFileSync(p, JSON.stringify(pkg, null, 2) + '\n');
-            "
-
-            TGZ=$(cd "$pkg_dir" && npm pack --silent --pack-destination /tmp)
-            tar -tvf "/tmp/$TGZ" | grep "bin/${binname}" | grep -q -- '-rwx' || {
-              echo "::error::exec bit missing on packed $binname for $target"
-              exit 1
-            }
-
-            (cd "$pkg_dir" && npm publish --provenance --access public)
-            echo "::endgroup::"
-          done
-
-      # The wrapper's optionalDependencies pin these exactly (not a caret),
-      # so it must never publish into the gap before all six are actually
-      # visible on the registry: a 404 on an optionalDependency is
-      # *silently skipped* by npm, not a failure, so publishing too early
-      # would produce a wrapper that installs clean with no binary.
       - name: wait for platform packages to become visible
-        run: |
-          set -euo pipefail
-          VERSION="${GITHUB_REF_NAME#v}"
-          for target in darwin-arm64 darwin-x64 linux-x64 linux-arm64 win32-x64 win32-arm64; do
-            pkg_name="@driftmapper/cli-${target}"
-            echo "waiting for ${pkg_name}@${VERSION}"
-            ok=false
-            for _ in $(seq 1 30); do
-              if npm view "${pkg_name}@${VERSION}" version >/dev/null 2>&1; then
-                ok=true
-                break
-              fi
-              sleep 10
-            done
-            if [ "$ok" != true ]; then
-              echo "::error::${pkg_name}@${VERSION} never became visible on the registry"
-              exit 1
-            fi
-          done
+        run: make wait-platforms VERSION="${GITHUB_REF_NAME#v}"
 
       - name: stamp and publish the wrapper
-        run: |
-          set -euo pipefail
-          VERSION="${GITHUB_REF_NAME#v}"
-          node -e "
-            const fs = require('fs');
-            const p = 'npm/wrapper/package.json';
-            const pkg = JSON.parse(fs.readFileSync(p, 'utf-8'));
-            pkg.version = '$VERSION';
-            for (const dep of Object.keys(pkg.optionalDependencies)) {
-              pkg.optionalDependencies[dep] = '$VERSION';
-            }
-            fs.writeFileSync(p, JSON.stringify(pkg, null, 2) + '\n');
-          "
-          cd npm/wrapper && npm publish --provenance --access public
+        run: make publish-wrapper VERSION="${GITHUB_REF_NAME#v}"
