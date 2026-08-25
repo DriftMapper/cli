@@ -7,7 +7,7 @@ import "os"
 
 const (
 	defaultAPIURL        = "https://api.driftmapper.io"
-	defaultOIDCAudience  = "https://driftmapper.com" // matches server's OIDC_AUDIENCE default
+	defaultOIDCAudience  = "https://driftmapper.io" // matches server's OIDC_AUDIENCE default
 	defaultBuildInfoFile = "build-info.html"
 )
 
