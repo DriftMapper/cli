@@ -48,6 +48,48 @@ func TestRegisterBuild_Success(t *testing.T) {
 	}
 }
 
+func TestRegisterDeclaredBuild_Success(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.URL.Path; got != "/v1/orgs/acme/builds" {
+			t.Errorf("path = %q, want /v1/orgs/acme/builds", got)
+		}
+		if got := r.Header.Get("Authorization"); got != "Bearer human-tok" {
+			t.Errorf("Authorization = %q, want Bearer human-tok", got)
+		}
+		if got := r.Header.Get("Idempotency-Key"); got != "idem-1" {
+			t.Errorf("Idempotency-Key = %q, want idem-1", got)
+		}
+		var body protocol.BuildRegistration
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatalf("decode request body: %v", err)
+		}
+		if body.Repository == nil || *body.Repository != "acme/widgets" {
+			t.Errorf("request repository = %v, want acme/widgets", body.Repository)
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		json.NewEncoder(w).Encode(map[string]any{
+			"data": protocol.Build{BuildInstanceId: "build1", Attribution: "declared"},
+		})
+	}))
+	defer srv.Close()
+
+	client := New(srv.URL, "human-tok")
+	repo := "acme/widgets"
+	build, created, err := client.RegisterDeclaredBuild(context.Background(), "acme", "idem-1",
+		protocol.BuildRegistration{CommitSha: "abc123", Repository: &repo})
+	if err != nil {
+		t.Fatalf("RegisterDeclaredBuild: %v", err)
+	}
+	if !created {
+		t.Error("created = false, want true (201)")
+	}
+	if build.BuildInstanceId != "build1" || build.Attribution != "declared" {
+		t.Errorf("build = %+v", build)
+	}
+}
+
 func TestRegisterBuild_IdempotentRetryReturns200NotCreated(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		resolutionURL := "https://driftmapper.test/r/build1"

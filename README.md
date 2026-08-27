@@ -1,9 +1,12 @@
 # driftmapper/cli
 
-The Driftmapper CLI: registers a build from inside your CI so Driftmapper can track it.
-The default action is write-only — it acquires a workload OIDC token, calls `POST
-/v1/builds`, and writes `build-info.html`. One other subcommand, `compare` (below), is a
-browser launcher with zero network calls of its own, not a read command.
+The Driftmapper CLI: registers a build so Driftmapper can track it, and writes
+`build-info.html` from the response. The default action is write-only, and picks its
+producer automatically: inside CI (a workload OIDC token is available) it registers a
+*verified* build; on a laptop with no CI at all, after `driftmapper login` (see below), it
+registers a *declared* one instead — same output, self-reported rather than confirmed
+against a token. `compare` is a separate subcommand, a browser launcher with zero network
+calls of its own, not a read command.
 
 ## Install and use
 
@@ -69,15 +72,36 @@ be launched (headless/SSH), the URL is printed to stdout instead so it's still u
 `compare` makes no network calls and requires `DRIFTMAPPER_DASHBOARD_URL` — there's no default
 dashboard origin yet.
 
+### Registering a build with no CI at all
+
+```bash
+driftmapper login    # once — opens your browser to approve this device
+driftmapper          # from inside any git checkout, any time after
+```
+
+`driftmapper login` pairs this machine with your Driftmapper account (device-code login,
+same mechanism GitHub's own CLI uses) and stores the resulting credential in
+`~/.config/driftmapper/credentials.json`, mode `0600`. Every `driftmapper` invocation after
+that reads build identity straight from the local git checkout (`git remote`, `HEAD`, the
+current commit's author/committer) and registers a *declared* build — self-reported, not
+CI-confirmed, and labeled as such on the resolution page and builds list. `driftmapper
+logout` deletes the stored credential.
+
+If you belong to more than one organization, set `DRIFTMAPPER_ORG` to the slug a declared
+build should attribute to — `driftmapper` won't guess.
+
 ### Environment variables
 
 | Variable | Default | Purpose |
 |---|---|---|
 | `DRIFTMAPPER_API_URL` | `https://api.driftmapper.io` | API base URL |
+| `DRIFTMAPPER_HUB_URL` | `https://hub.driftmapper.io` | Base URL `login`/`logout` talk to for device-code pairing |
 | `DRIFTMAPPER_OIDC_AUDIENCE` | `https://driftmapper.io` | `aud` claim requested from the CI provider |
 | `DRIFTMAPPER_BUILD_INFO_FILE` | `build-info.html` | Output path (overridable per-run via `--output`) |
 | `DRIFTMAPPER_DASHBOARD_URL` | — | Dashboard SPA origin `compare` opens (required for `compare`; no default) |
-| `DRIFTMAPPER_CHALLENGE` | — | Single-use repository-authorization value (see "Authorizing a new repository" above); never a flag |
+| `DRIFTMAPPER_CHALLENGE` | — | Single-use repository-authorization value (see "Authorizing a new repository" above); never a flag; CI producer only |
+| `DRIFTMAPPER_ORG` | — | Org slug a declared (non-CI) build attributes to; required only if you belong to more than one org |
+| `DRIFTMAPPER_CONFIG_DIR` | XDG config dir | Where `login` stores its credential file |
 | `DRIFTMAPPER_BINARY_PATH` | — | Absolute path to a binary the npm launcher should run instead of resolving one |
 
 ## No npm? Download a raw binary
