@@ -9,14 +9,11 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"net/http"
-	"net/url"
 	"slices"
 	"strings"
-	"time"
 
 	"github.com/driftmapper/protocol"
 )
@@ -101,132 +98,6 @@ func (c *Client) AuthorizeRepository(ctx context.Context, challenge string) (pro
 		return protocol.RepositoryAuthorization{}, fmt.Errorf("decode repository authorization: %w", err)
 	}
 	return auth, nil
-}
-
-// deployRetryBackoff is RecordDeployment's bounded retry schedule for
-// transient failures — three attempts beyond the first, ~1s/2s/4s apart.
-// Deploy events are infrequent and block a CI job's exit code, so a brief
-// network blip shouldn't fail the whole deploy step the way it might for a
-// higher-volume call; this is deliberately a small local schedule, not a
-// general retry policy layer — nothing else in this codebase needs one yet.
-var deployRetryBackoff = []time.Duration{time.Second, 2 * time.Second, 4 * time.Second}
-
-// RecordDeployment calls POST /v1/deployments (spec's deploy-marking
-// design, DRFT-81/82/88) — records that the newest build registered for
-// commitSHA, under the token's repository, is deployed to environment. The
-// server resolves commitSHA to a build_instance_id itself (DRFT-92: a
-// deploy step generally can't know the opaque, server-derived build ID a
-// separate registration step produced). created is false when the server
-// returned 200 (an identical retry, same CI run, hit the dedupe key), true
-// on 201 — same convention as RegisterBuild.
-//
-// Retries transient failures (connection errors, 5xx, 429) per
-// deployRetryBackoff; a genuine 4xx (no_live_policy, validation, not_found)
-// is permanent and returned on the first attempt, never retried.
-func (c *Client) RecordDeployment(ctx context.Context, commitSHA, environment string) (deployment protocol.Deployment, created bool, err error) {
-	for attempt := 0; ; attempt++ {
-		deployment, created, err = c.recordDeploymentOnce(ctx, commitSHA, environment)
-		if err == nil || !isTransient(err) || attempt >= len(deployRetryBackoff) {
-			return deployment, created, err
-		}
-		select {
-		case <-time.After(deployRetryBackoff[attempt]):
-		case <-ctx.Done():
-			return protocol.Deployment{}, false, ctx.Err()
-		}
-	}
-}
-
-func (c *Client) recordDeploymentOnce(ctx context.Context, commitSHA, environment string) (deployment protocol.Deployment, created bool, err error) {
-	data, status, err := c.doJSON(ctx, "/v1/deployments", protocol.DeploymentRequest{
-		CommitSha:   commitSHA,
-		Environment: environment,
-	}, http.StatusOK, http.StatusCreated)
-	if err != nil {
-		return protocol.Deployment{}, false, err
-	}
-	if err := json.Unmarshal(data, &deployment); err != nil {
-		return protocol.Deployment{}, false, fmt.Errorf("decode deployment (status %d): %w", status, err)
-	}
-	return deployment, status == http.StatusCreated, nil
-}
-
-// GetCurrentDeployment calls GET /v1/deployments/current (DRFT-98) — the
-// read half of deployment-keyed verification: `driftmapper verify
-// <environment>` names a constant its own deploy step already used and
-// needs what that environment's current deployment row carries (expected
-// build-instance id, recorded url). The server defines "currently
-// deployed" as the newest kind='deploy' row for (repository_id,
-// environment) by created_at — never anything client-supplied.
-//
-// targetRepo is empty to read the token's own repository; non-empty
-// (`owner/name`) it targets another repository's environment, which
-// requires an admin-created kind='verify' binding — without one the 404 is
-// deliberately indistinguishable from an empty coordinate (existence
-// hiding), so callers cannot probe other repositories' environments.
-func (c *Client) GetCurrentDeployment(ctx context.Context, targetRepo, environment string) (deployment protocol.Deployment, err error) {
-	q := url.Values{"env": []string{environment}}
-	if targetRepo != "" {
-		q.Set("repo", targetRepo)
-	}
-	data, status, err := c.do(ctx, http.MethodGet, "/v1/deployments/current?"+q.Encode(), nil, http.StatusOK)
-	if err != nil {
-		return protocol.Deployment{}, err
-	}
-	if err := json.Unmarshal(data, &deployment); err != nil {
-		return protocol.Deployment{}, fmt.Errorf("decode deployment (status %d): %w", status, err)
-	}
-	return deployment, nil
-}
-
-// RecordVerification calls POST /v1/verifications. The enriched request
-// (DRFT-98) records what an opinionated caller observed: deployment_id
-// provenance, source_url fetched, observed_build_instance_id parsed from
-// the deployed meta tags, and outcome (verified/mismatch/fetch_failed/
-// parse_failed). A bare attestation sends only the required pair.
-// created is false when the server returned 200 (an identical retry,
-// same CI run, hit the dedupe key), true on 201.
-//
-// Retries transient failures per deployRetryBackoff; a genuine 4xx is
-// permanent and returned on the first attempt, never retried.
-func (c *Client) RecordVerification(ctx context.Context, req protocol.VerificationRequest) (verification protocol.Verification, created bool, err error) {
-	for attempt := 0; ; attempt++ {
-		verification, created, err = c.recordVerificationOnce(ctx, req)
-		if err == nil || !isTransient(err) || attempt >= len(deployRetryBackoff) {
-			return verification, created, err
-		}
-		select {
-		case <-time.After(deployRetryBackoff[attempt]):
-		case <-ctx.Done():
-			return protocol.Verification{}, false, ctx.Err()
-		}
-	}
-}
-
-func (c *Client) recordVerificationOnce(ctx context.Context, req protocol.VerificationRequest) (verification protocol.Verification, created bool, err error) {
-	data, status, err := c.doJSON(ctx, "/v1/verifications", req, http.StatusOK, http.StatusCreated)
-	if err != nil {
-		return protocol.Verification{}, false, err
-	}
-	if err := json.Unmarshal(data, &verification); err != nil {
-		return protocol.Verification{}, false, fmt.Errorf("decode verification (status %d): %w", status, err)
-	}
-	return verification, status == http.StatusCreated, nil
-}
-
-// isTransient reports whether err is worth retrying: a connection-level
-// failure (doJSON's http.Client.Do never got a response at all, surfaced as
-// *url.Error) or a *Error carrying a 5xx or 429 — server overload/rate
-// limiting, not a rejection of the request itself. Any other *Error (422
-// validation, 403 no_live_policy/claim_mismatch, 404 not_found) is a
-// permanent rejection that retrying can't fix.
-func isTransient(err error) bool {
-	var apiErr *Error
-	if errors.As(err, &apiErr) {
-		return apiErr.StatusCode >= 500 || apiErr.StatusCode == http.StatusTooManyRequests
-	}
-	var urlErr *url.Error
-	return errors.As(err, &urlErr)
 }
 
 // doJSON POSTs body as JSON to path and unwraps the {"data"}/{"error"}
