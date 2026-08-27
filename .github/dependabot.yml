@@ -1,0 +1,11 @@
+version: 2
+updates:
+  # Keeps github.com/driftmapper/protocol's pin moving. go.mod's require
+  # line is the only thing standing between this CLI and a stale wire
+  # contract, and nothing today reminds a human to bump it on every
+  # protocol release — this opens a PR instead (server/CLAUDE.md's
+  # "Wire contract" section, DRFT-133, has the fuller rationale).
+  - package-ecosystem: gomod
+    directory: /
+    schedule:
+      interval: weekly
