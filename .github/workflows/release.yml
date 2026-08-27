@@ -77,8 +77,9 @@ jobs:
   # publisher can't be configured on npmjs.com for a package that doesn't
   # exist yet, so without this gate every fork's first tag push would red-X.
   # Set the `NPM_PUBLISH` repo/environment variable to `true` once all
-  # seven @driftmapper/cli* packages have trusted publishers configured on
-  # npmjs.com for this repo+workflow.
+  # eight packages — the seven @driftmapper/cli* packages plus the unscoped
+  # driftmapper alias — have trusted publishers configured on npmjs.com for
+  # this repo+workflow.
   publish-npm:
     needs: build
     if: vars.NPM_PUBLISH == 'true'
@@ -102,11 +103,12 @@ jobs:
           mkdir -p dist
           gh release download "${{ github.ref_name }}" --dir dist --pattern 'driftmapper-*'
 
-      # publish-platforms/wait-platforms/publish-wrapper are the same
-      # Makefile targets a maintainer runs locally for a bootstrap publish —
-      # one implementation of the publish sequence, not two that can drift
-      # apart. See the targets' own comments in Makefile for the ordering
-      # and idempotency reasoning (mirrored in CLAUDE.md).
+      # publish-platforms/wait-platforms/publish-wrapper/wait-wrapper/
+      # publish-alias are the same Makefile targets a maintainer runs
+      # locally for a bootstrap publish — one implementation of the publish
+      # sequence, not two that can drift apart. See the targets' own
+      # comments in Makefile for the ordering and idempotency reasoning
+      # (mirrored in CLAUDE.md).
       - name: publish platform packages
         run: make publish-platforms VERSION="${GITHUB_REF_NAME#v}"
 
@@ -115,3 +117,9 @@ jobs:
 
       - name: stamp and publish the wrapper
         run: make publish-wrapper VERSION="${GITHUB_REF_NAME#v}"
+
+      - name: wait for the wrapper to become visible
+        run: make wait-wrapper VERSION="${GITHUB_REF_NAME#v}"
+
+      - name: stamp and publish the unscoped driftmapper alias
+        run: make publish-alias VERSION="${GITHUB_REF_NAME#v}"
