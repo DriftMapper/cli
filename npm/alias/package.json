@@ -1,0 +1,32 @@
+{
+  "name": "driftmapper",
+  "version": "0.0.0",
+  "description": "Driftmapper CLI — unscoped alias for @driftmapper/cli, so `npx driftmapper` and `npx @driftmapper/cli` behave identically",
+  "bin": {
+    "driftmapper": "bin/index.js"
+  },
+  "files": [
+    "bin",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "@driftmapper/cli": "0.0.0"
+  },
+  "scripts": {
+    "test:e2e": "bash test/e2e.sh"
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/DriftMapper/cli.git",
+    "directory": "npm/alias"
+  },
+  "license": "Apache-2.0"
+}

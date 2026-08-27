@@ -33,8 +33,9 @@ endif
 PROVENANCE ?= true
 PROVENANCE_FLAG = $(if $(filter true,$(PROVENANCE)),--provenance,--no-provenance)
 
-.PHONY: help build vet format test cross npm-test e2e npm-check check clean \
-	release-build publish-platforms wait-platforms publish-wrapper publish-npm require-version
+.PHONY: help build vet format test cross npm-test e2e alias-e2e npm-check check clean \
+	release-build publish-platforms wait-platforms publish-wrapper wait-wrapper \
+	publish-alias publish-npm require-version
 
 help: ## List available targets
 	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | sort | \
@@ -155,7 +156,36 @@ publish-wrapper: require-version ## Stamp+publish the @driftmapper/cli wrapper p
 		fs.writeFileSync(p, JSON.stringify(pkg, null, 2) + '\n');"
 	cd npm/wrapper && npm publish $(PROVENANCE_FLAG) --access public
 
-publish-npm: publish-platforms wait-platforms publish-wrapper ## Full publish sequence: platform packages, wait, then wrapper (requires VERSION=x.y.z; same order release.yml uses)
+# The alias's dependency on @driftmapper/cli is pinned exact, same reasoning
+# as the wrapper's optionalDependencies pins (see CLAUDE.md) — never call
+# publish-alias before the wrapper is actually visible.
+wait-wrapper: require-version ## Poll the registry until @driftmapper/cli is visible at VERSION (requires VERSION=x.y.z)
+	@printf 'waiting for @driftmapper/cli@$(VERSION) '; \
+	ok=false; \
+	for attempt in $$(seq 1 30); do \
+		if npm view "@driftmapper/cli@$(VERSION)" version >/dev/null 2>&1; then ok=true; break; fi; \
+		printf '.'; \
+		sleep 10; \
+	done; \
+	if [ "$$ok" = true ]; then \
+		echo "found (attempt $$attempt/30)"; \
+	else \
+		echo "FAILED"; \
+		echo "@driftmapper/cli@$(VERSION) never became visible on the registry after 30 attempts (5 min)"; \
+		exit 1; \
+	fi
+
+publish-alias: require-version ## Stamp+publish the unscoped driftmapper alias package (requires VERSION=x.y.z; run only after wait-wrapper)
+	@node -e "\
+		const fs = require('fs'); \
+		const p = 'npm/alias/package.json'; \
+		const pkg = JSON.parse(fs.readFileSync(p, 'utf-8')); \
+		pkg.version = '$(VERSION)'; \
+		pkg.dependencies['@driftmapper/cli'] = '$(VERSION)'; \
+		fs.writeFileSync(p, JSON.stringify(pkg, null, 2) + '\n');"
+	cd npm/alias && npm publish $(PROVENANCE_FLAG) --access public
+
+publish-npm: publish-platforms wait-platforms publish-wrapper wait-wrapper publish-alias ## Full publish sequence: platform packages, wait, wrapper, wait, alias (requires VERSION=x.y.z; same order release.yml uses)
 
 npm-test: ## Run the npm wrapper's unit tests (resolve.js logic)
 	cd npm/wrapper && node --test
@@ -163,7 +193,10 @@ npm-test: ## Run the npm wrapper's unit tests (resolve.js logic)
 e2e: ## Pack-and-install e2e: builds a real driftmapper binary, exercises the launcher
 	cd npm/wrapper && npm run test:e2e
 
-npm-check: npm-test e2e ## Run both npm wrapper checks (unit tests + e2e)
+alias-e2e: ## Pack-and-install e2e for the unscoped driftmapper alias package
+	cd npm/alias && npm run test:e2e
+
+npm-check: npm-test e2e alias-e2e ## Run all npm checks (wrapper unit tests + wrapper e2e + alias e2e)
 
 check: test npm-check ## Run everything CI runs: go vet+test, npm unit tests, e2e
 

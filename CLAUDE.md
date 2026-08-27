@@ -35,10 +35,12 @@ functionality would resurface if a `probe <url>` command is ever built.
 "confirm, don't derive"** and added the declared producer above — see `internal/gitcontext`'s
 and `internal/deviceauth`'s package docs, and "Gotcha — two producers, one output shape" below.
 
-Distributed via npm (`npx @driftmapper/cli`) with per-platform binaries resolved through npm's
-`os`/`cpu` fields as `optionalDependencies`, plus raw binaries on GitHub Releases as a fallback
-for npm-blocked environments. `npm/wrapper` is a pure launcher — it locates and execs the Go
-binary, and reimplements none of its logic.
+Distributed via npm (`npx @driftmapper/cli`, or the unscoped `npx driftmapper` alias — DRFT-134)
+with per-platform binaries resolved through npm's `os`/`cpu` fields as `optionalDependencies`,
+plus raw binaries on GitHub Releases as a fallback for npm-blocked environments. `npm/wrapper` is
+a pure launcher — it locates and execs the Go binary, and reimplements none of its logic.
+`npm/alias` is a second pure launcher one level up: it reimplements none of the wrapper's logic
+either, see "Gotcha — the unscoped alias reimplements nothing" below.
 
 **Public by design, not by accident** (DRFT-19): this binary executes inside customer CI, so
 auditability — anyone can read the source that runs in their pipeline, and reproduce the exact
@@ -68,6 +70,9 @@ make cross       # cross-compile all six release targets + reproducibility check
 cd npm/wrapper
 node --test          # unit tests for the resolution logic
 npm run test:e2e      # pack-and-install e2e — see the gotcha below on why this exists
+
+cd npm/alias
+npm run test:e2e      # pack-and-install e2e proving the alias behaves identically to the wrapper
 ```
 
 ## Architecture
@@ -136,6 +141,9 @@ npm/
                           lib/resolve.js (resolution chain + PATH-fallback guard), test/
   platforms/cli-<os>-<arch>/   one npm package per target, each just os/cpu/main/files —
                           the binary is copied into bin/ at release time, never committed
+  alias/                  the unscoped `driftmapper` package (DRFT-134): bin/index.js is a
+                          single `require('@driftmapper/cli/bin/index.js')`, nothing else —
+                          see "Gotcha — the unscoped alias reimplements nothing" below
 ```
 
 ## Gotcha — the version sentinel is a permanent compatibility contract
@@ -192,6 +200,36 @@ Two things that look like reasonable additions to `npm/platforms/*/package.json`
   throw `ERR_PACKAGE_PATH_NOT_EXPORTED`, silently degrading every user of that platform to the
   `PATH` fallback.
 
+The same trap now also applies to `npm/wrapper/package.json` itself: `npm/alias/bin/index.js`
+does `require('@driftmapper/cli/bin/index.js')`, an explicit subpath outside `main`. Adding
+`exports` to the wrapper without listing that subpath would break the unscoped `driftmapper`
+alias the same way it breaks the platform-package tier above.
+
+## Gotcha — the unscoped alias reimplements nothing
+
+`npm/alias` (published as `driftmapper`, DRFT-134) exists purely to squat the unscoped name so
+`npx driftmapper` and `npx @driftmapper/cli` behave identically — see "Repo naming/npm
+distribution" context in DRFT-134. Its entire `bin/index.js` is
+`require('@driftmapper/cli/bin/index.js')`. This works, and stays correct with zero maintenance,
+for two reasons:
+
+- The real `bin/index.js`'s `main()` runs unconditionally at module load — it is not gated
+  behind `require.main === module` — so `require()`-ing it from a different file executes the
+  exact same `resolve()`/`spawn()` call, in-process, as running it directly.
+- Every path `resolve.js` computes (`__dirname`-relative lookups, `require.resolve` of sibling
+  platform packages) resolves relative to *where that file actually lives on disk* — inside
+  `@driftmapper/cli`'s own `node_modules` entry — never relative to the alias's location or to
+  `process.argv[1]`. `process.argv.slice(2)` is likewise unaffected by which file is `argv[1]`.
+
+Do not "simplify" this into a `spawn('node', [...])` re-exec, and do not copy any of
+`resolve.js`'s logic into the alias — either would be a second implementation of the launcher
+that can silently drift from the first. If the wrapper's launcher ever needs a behavior change,
+the alias picks it up for free by construction; a re-exec or copy would not.
+
+The alias's dependency on `@driftmapper/cli` is pinned to an **exact** version, published only
+after the wrapper is confirmed visible on the registry — see the next gotcha, which this extends
+by one more package.
+
 ## Gotcha — the exec bit is not preserved automatically
 
 `gh release download` and GitHub's artifact upload/download both drop the executable bit. Since
@@ -202,20 +240,22 @@ install time either — the mode baked into the published tarball is all an end 
 `npm/wrapper/test/e2e.sh` runs the same assertion locally, before anything is ever pushed to a
 registry.
 
-## Gotcha — publish platform packages first, idempotently, then wait, then the wrapper
+## Gotcha — publish platform packages first, idempotently, then wait, then the wrapper, then the alias
 
-The wrapper pins all six platform deps to an **exact** version, not a caret range — all seven
-packages release from one git tag in lockstep, so the version *is* the contract. A caret would
-let wrapper `v1.2.3` execute binary `v1.9.0` with a different (possibly incompatible) command
-surface, and one bad platform-package patch would retroactively poison every previously
-published wrapper version with no way to roll back.
+The wrapper pins all six platform deps to an **exact** version, not a caret range, and the alias
+pins its `@driftmapper/cli` dependency the same way — all eight packages release from one git tag
+in lockstep, so the version *is* the contract. A caret would let wrapper `v1.2.3` execute binary
+`v1.9.0` (or alias `v1.2.3` execute wrapper `v1.9.0`) with a different, possibly incompatible
+command surface, and one bad patch would retroactively poison every previously published version
+downstream of it with no way to roll back.
 
 Given that, and given the "missing optionalDependency fails silently" gotcha above, `release.yml`
 publishes in a specific order: all six platform packages first — each checked against `npm view`
 first, so re-running the same tag after a partial failure doesn't error out on packages already
 published — then polls `npm view` until all six are actually visible (registry propagation is
-not instant), and only then stamps and publishes the wrapper. Publishing the wrapper into the
-gap before the platform packages are visible would produce a wrapper that installs clean with no
+not instant), then stamps and publishes the wrapper, waits for *it* to become visible the same
+way, and only then stamps and publishes the alias. Publishing either downstream package into the
+gap before its dependency is visible would produce an install that resolves clean with no working
 binary for anyone who happens to install in that window.
 
 ## Gotcha — `NPM_PUBLISH` gates the whole publish job
@@ -223,8 +263,11 @@ binary for anyone who happens to install in that window.
 A trusted publisher can't be configured on npmjs.com for a package that doesn't exist yet, so
 without a gate, the very first tag push would red-X on `publish-npm`. The job is
 `if: vars.NPM_PUBLISH == 'true'` — set that repo/environment variable to `true` only once all
-seven `@driftmapper/cli*` packages have trusted publishers configured for this repo+workflow on
-npmjs.com.
+eight packages — the seven `@driftmapper/cli*` packages plus the unscoped `driftmapper` alias —
+have trusted publishers configured for this repo+workflow on npmjs.com. Reserving the unscoped
+name itself (a first, manual, token-authenticated `npm publish` from a maintainer's machine,
+since there's nothing yet for a trusted publisher to attach to) is a prerequisite this gate
+can't do for you — same bootstrap chicken-and-egg the original seven packages went through.
 
 ## Gotcha — `compare` is a browser launcher, not a read command, and why
 
