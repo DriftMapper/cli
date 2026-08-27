@@ -5,12 +5,20 @@ repository.
 
 ## What this repo is
 
-`driftmapper/cli` — the CLI that runs inside a customer's CI to register a build with
-Driftmapper (spec §5.2a). Its default action (no subcommand) is **write-only**: acquire a
-workload OIDC token, `POST /v1/builds`, write `build-info.html` from the response. When
-`$DRIFTMAPPER_CHALLENGE` is set (spec §4.5, DRFT-66) it first redeems that challenge — binding
-the repository to an org — before registering; still a write, not a read. See "Gotcha —
-challenge redemption is folded into the default action, not a separate command" below.
+`driftmapper/cli` — the CLI that registers a build with Driftmapper and writes
+`build-info.html` from the response. Its default action (no subcommand) is **write-only** and
+picks its producer automatically (DRFT-124/DRFT-129, spec §5.2a's "smart enough" principle):
+
+- **Verified** — inside a customer's CI: acquire a workload OIDC token, `POST /v1/builds`,
+  where repository identity is confirmed against the token's own verified claims. When
+  `$DRIFTMAPPER_CHALLENGE` is set (spec §4.5, DRFT-66) it first redeems that challenge —
+  binding the repository to an org — before registering; still a write, not a read. See
+  "Gotcha — challenge redemption is folded into the default action, not a separate command"
+  below.
+- **Declared** — a laptop with no CI at all, after `driftmapper login` (DRFT-30): read build
+  identity straight from the local git checkout (`internal/gitcontext`), `POST
+  /v1/orgs/{slug}/builds`, self-reported and org-attributed rather than token-confirmed. See
+  "Gotcha — two producers, one output shape" below.
 
 `compare` (spec DRFT-50, superseding DRFT-26) is a pure browser launcher for
 the SPA compare view (DRFT-29, `driftmapper/static`), with zero network calls of
@@ -22,6 +30,10 @@ build-info file itself, not tracking what's deployed where. `internal/buildinfo`
 kept: it's the format's reference implementation and now core product, not verify's leftover.
 `internal/sitefetch` (verify's fetcher) was deleted outright; see DRFT-131 for where its
 functionality would resurface if a `probe <url>` command is ever built.
+
+**DRFT-129 (2026-08-27) inverted spec §2.2a's "token-derived, never from the body" rule to
+"confirm, don't derive"** and added the declared producer above — see `internal/gitcontext`'s
+and `internal/deviceauth`'s package docs, and "Gotcha — two producers, one output shape" below.
 
 Distributed via npm (`npx @driftmapper/cli`) with per-platform binaries resolved through npm's
 `os`/`cpu` fields as `optionalDependencies`, plus raw binaries on GitHub Releases as a fallback
@@ -48,6 +60,7 @@ go vet ./... && go test ./...
 go build -o bin/driftmapper ./cmd/driftmapper
 DRIFTMAPPER_DASHBOARD_URL=https://... ./bin/driftmapper compare <build-id-a> <build-id-b>   # DRFT-50; no default dashboard origin, see internal/config
 DRIFTMAPPER_CHALLENGE=... ./bin/driftmapper   # DRFT-66; redeems before registering, see internal/config.Challenge
+./bin/driftmapper login && ./bin/driftmapper   # DRFT-30/DRFT-129; declared producer, no CI at all — see internal/deviceauth
 
 make check      # everything CI runs: go vet+test, npm unit tests, pack-and-install e2e
 make cross       # cross-compile all six release targets + reproducibility check
@@ -66,19 +79,36 @@ cmd/driftmapper/main.go   entry point; dispatches to `compare` before the defaul
                           stamped/declared here — name is the version-sentinel
                           contract with the npm launcher, see gotcha below
 internal/
-  config/                 DRIFTMAPPER_API_URL / DRIFTMAPPER_OIDC_AUDIENCE / build-info
-                          path, all zero-config-by-default (spec §5.2a). DashboardURL
-                          (DRIFTMAPPER_DASHBOARD_URL, DRFT-36) and Challenge
-                          (DRIFTMAPPER_CHALLENGE, DRFT-66) are the two exceptions — no
-                          default for either; Challenge is also never a flag (bearer secret)
+  config/                 DRIFTMAPPER_API_URL / DRIFTMAPPER_HUB_URL /
+                          DRIFTMAPPER_OIDC_AUDIENCE / build-info path, all
+                          zero-config-by-default (spec §5.2a). DashboardURL
+                          (DRIFTMAPPER_DASHBOARD_URL, DRFT-36), Challenge
+                          (DRIFTMAPPER_CHALLENGE, DRFT-66), and Org (DRIFTMAPPER_ORG,
+                          DRFT-129) have no default — Challenge is also never a flag
+                          (bearer secret); Org is required only for a declared
+                          registration when the signed-in human belongs to >1 org
   oidcclient/             acquires (never verifies) a workload OIDC token — v1 is GitHub
                           Actions only (spec §4.3/§4.4); verification is exclusively
                           server-side (spec §5.2: "must never ship in a binary running on
                           customer infrastructure")
-  buildcontext/           normalizes GitHub Actions' env into the CLI-submitted half of a
-                          build registration (spec §2.2a) — repo identity/ref/workflow/run
-                          are deliberately NOT here; they're token-derived and the server
-                          rejects them if present in the body
+  gitcontext/              reads build identity directly from the local git checkout —
+                           repository/ref/commit/author/committer (DRFT-129) — via `git`
+                           subprocess calls, not a Go git library (stdlib-only posture).
+                           The base layer both producers build on; see "Gotcha — two
+                           producers, one output shape" below
+  deviceauth/              `driftmapper login`/`logout` (DRFT-30): hub-brokered
+                           device-code pairing, credential storage
+                           (~/.config/driftmapper/credentials.json, mode 0600, no OS
+                           keyring), and AccessToken's refresh-on-every-call — the
+                           declared producer's entire auth story
+  buildcontext/           normalizes a build's context into the CLI-submitted half of a
+                          build registration (spec §2.2a, inverted by DRFT-129).
+                          FromGit (gitcontext-backed) is the base layer both producers
+                          share; FromGitHubActions overlays CI-only facts (trigger
+                          event; GITHUB_SHA as the authoritative commit) on top.
+                          repository_id/visibility/workflow/run_id/run_attempt remain
+                          exclusively token-derived — the server rejects them if
+                          present in the body
   buildinfo/               generates build-info.html (spec §2.3) as a pure function of one
                            server response — no server call. The one derived value is the
                            click-only sign-in link (DRFT-52): `/login?next=<resolution
@@ -88,8 +118,11 @@ internal/
                            product (DRFT-124), not a verification-feature byproduct;
                            producer and parser live in one package so they cannot drift
   apiclient/               client for the CLI's public-tier operations — POST /v1/builds,
-                           POST /v1/repositories/authorize (DRFT-66) — sharing one
-                           {"data"}/{"error"} envelope-unwrapping helper (doJSON/do), per
+                           POST /v1/orgs/{slug}/builds (DRFT-129), POST
+                           /v1/repositories/authorize (DRFT-66), GET /v1/orgs
+                           (dashboard-tier, used only to resolve DRIFTMAPPER_ORG at
+                           `login` time) — sharing one {"data"}/{"error"}
+                           envelope-unwrapping helper (doJSON/do), per
                            driftmapper/protocol's openapi.yaml
   compare/                 `driftmapper compare`'s URL-building logic (spec DRFT-50) —
                           OpenURL builds the SPA compare view URL from two build-instance
@@ -238,6 +271,28 @@ the repository it originally bound succeeds again, rather than erroring), so a
 `DRIFTMAPPER_CHALLENGE` secret left in place after binding doesn't actually break later
 runs — this CLI just doesn't (and shouldn't) know that from here; it relies on the server
 having made it true.
+
+## Gotcha — two producers, one output shape
+
+`run` (`cmd/driftmapper/main.go`) picks between `runVerified` and `runDeclared` on exactly
+one signal: whether `ACTIONS_ID_TOKEN_REQUEST_URL` is set. That env var is only ever present
+inside a job that requested `permissions: id-token: write`, so its presence is a reliable
+"we're in CI" fact, not a heuristic — this is spec §5.2a's "the CLI should be smart enough to
+tell it's in a git repo" principle applied to producer selection specifically, settled during
+DRFT-124's re-scope.
+
+Both producers end at the same call: `writeBuildInfo` takes whatever `protocol.Build` either
+one got back and runs it through `buildinfo.Generate` unchanged — attribution (`verified` vs.
+`declared`) is a field on that response, not a branch in this repo's own logic. Don't
+special-case declared builds in `buildinfo`/`internal/buildinfo` to "look different" — the
+whole point of DRFT-129 is that both producers are the same product, confirmed one way or
+self-reported the other.
+
+`runDeclared` has no equivalent to `maybeAuthorize`/`DRIFTMAPPER_CHALLENGE` — there's nothing
+to bind. A declared registration's authorization *is* org membership, established once at
+`driftmapper login` time and re-verified server-side (`OrgScoped`) on every call; `resolveOrg`
+picks which org from `DRIFTMAPPER_ORG` or, failing that, the signed-in human's sole org — see
+its own doc comment for why an ambiguous multi-org case is always an error, never a default.
 
 ## The `protocol` dependency is public for a reason
 

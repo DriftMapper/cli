@@ -223,3 +223,88 @@ func TestRegisterBuildError_OtherCodesWrapGenerically(t *testing.T) {
 		t.Errorf("err = %q, want no challenge guidance for a non-no_live_policy error", err.Error())
 	}
 }
+
+func listOrgsServer(t *testing.T, orgs []protocol.OrgWithRole) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/orgs" {
+			t.Errorf("path = %q, want /v1/orgs", r.URL.Path)
+		}
+		w.WriteHeader(http.StatusOK)
+		json.NewEncoder(w).Encode(map[string]any{"data": orgs})
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+func TestResolveOrg_EnvVarWinsWithNoNetworkCall(t *testing.T) {
+	t.Setenv("DRIFTMAPPER_ORG", "acme")
+	client := apiclient.New("http://127.0.0.1:0", "tok") // unreachable — proves no call is made
+
+	slug, err := resolveOrg(context.Background(), client)
+	if err != nil {
+		t.Fatalf("resolveOrg: %v", err)
+	}
+	if slug != "acme" {
+		t.Errorf("slug = %q, want acme", slug)
+	}
+}
+
+func TestResolveOrg_SingleOrgDefaultsToIt(t *testing.T) {
+	t.Setenv("DRIFTMAPPER_ORG", "")
+	srv := listOrgsServer(t, []protocol.OrgWithRole{{Slug: "only-org"}})
+	client := apiclient.New(srv.URL, "tok")
+
+	slug, err := resolveOrg(context.Background(), client)
+	if err != nil {
+		t.Fatalf("resolveOrg: %v", err)
+	}
+	if slug != "only-org" {
+		t.Errorf("slug = %q, want only-org", slug)
+	}
+}
+
+func TestResolveOrg_MultipleOrgsRequiresChoice(t *testing.T) {
+	t.Setenv("DRIFTMAPPER_ORG", "")
+	srv := listOrgsServer(t, []protocol.OrgWithRole{
+		{Slug: "org-a"}, {Slug: "org-b"},
+	})
+	client := apiclient.New(srv.URL, "tok")
+
+	_, err := resolveOrg(context.Background(), client)
+	if err == nil {
+		t.Fatal("resolveOrg: want error, got nil")
+	}
+	for _, want := range []string{"DRIFTMAPPER_ORG", "org-a", "org-b"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("err = %q, want it to contain %q", err.Error(), want)
+		}
+	}
+}
+
+func TestResolveOrg_NoOrgs(t *testing.T) {
+	t.Setenv("DRIFTMAPPER_ORG", "")
+	srv := listOrgsServer(t, nil)
+	client := apiclient.New(srv.URL, "tok")
+
+	if _, err := resolveOrg(context.Background(), client); err == nil {
+		t.Error("resolveOrg with zero orgs: want error, got nil")
+	}
+}
+
+func TestNewIdempotencyKey_UniqueAndNonEmpty(t *testing.T) {
+	a, err := newIdempotencyKey()
+	if err != nil {
+		t.Fatalf("newIdempotencyKey: %v", err)
+	}
+	b, err := newIdempotencyKey()
+	if err != nil {
+		t.Fatalf("newIdempotencyKey: %v", err)
+	}
+	if a == "" || b == "" {
+		t.Fatal("newIdempotencyKey returned an empty value")
+	}
+	if a == b {
+		t.Error("two calls returned the same value")
+	}
+}

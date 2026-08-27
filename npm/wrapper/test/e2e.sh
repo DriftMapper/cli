@@ -13,9 +13,10 @@
 # code path (require.resolve against node_modules) without depending on
 # registry state.
 #
-# The CLI itself has exactly one action (spec §5.2a: acquire an OIDC token,
-# register a build, write build-info.html) and needs live GitHub Actions
-# env vars plus a reachable API, so it can't be driven end to end here.
+# The CLI's default action picks its producer from the environment (DRFT-129:
+# the verified/OIDC producer when ACTIONS_ID_TOKEN_REQUEST_URL is set, the
+# declared/credentialed producer otherwise) and needs live CI env vars or a
+# stored login plus a reachable API, so it can't be driven end to end here.
 # What's tested instead is the launcher/resolver contract: the version
 # sentinel, pipe behavior, clean error propagation, the missing-package
 # error, and PATH-decoy rejection.
@@ -81,12 +82,17 @@ echo "==> piping does not wedge"
 "$CLI_BIN" --version | head -n1 >/dev/null
 
 echo "==> a missing CI environment fails clean and nonzero, not hung or silent"
-if OUT="$(env -i PATH="$PATH" "$CLI_BIN" 2>&1)"; then
+# DRFT-129: without ACTIONS_ID_TOKEN_REQUEST_URL the default action runs the
+# declared (laptop) producer, which needs a prior `driftmapper login` — so a
+# no-CI environment with no stored credential must fail fast with login
+# guidance, not hang or silently succeed. HOME points at a scratch dir so the
+# failure is the meaningful "not logged in" state, not a no-config-dir error.
+if OUT="$(env -i PATH="$PATH" HOME="$WORK/home" "$CLI_BIN" 2>&1)"; then
   echo "FAIL: expected a nonzero exit with no GitHub Actions OIDC env vars set"
   exit 1
 fi
-echo "$OUT" | grep -qi "id-token" || {
-  echo "FAIL: missing-OIDC-env error was not actionable: $OUT"
+echo "$OUT" | grep -qi "driftmapper login" || {
+  echo "FAIL: missing-CI error was not actionable: $OUT"
   exit 1
 }
 

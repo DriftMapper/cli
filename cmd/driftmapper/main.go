@@ -1,24 +1,32 @@
-// Command driftmapper's default action (no subcommand) is the MVP CI job
-// (spec §5.2a): acquire a workload OIDC token, register a build, and write
-// build-info.html from the response. Write-only — it reads nothing back,
-// and every existing pinned CI invocation calls it exactly this way, so
-// that path must never change shape.
+// Command driftmapper's default action (no subcommand) registers a build
+// and writes build-info.html from the response. Write-only — it reads
+// nothing back. DRFT-124/DRFT-129: there are now two producers, chosen
+// automatically per the "smart enough" principle (see run's own doc
+// comment) — every existing pinned CI invocation keeps calling it exactly
+// as before, so that path must never change shape.
 //
-// When $DRIFTMAPPER_CHALLENGE is set (spec §4.5, DRFT-66), the default
-// action first redeems it — binding the repository to an org — before
+// When $DRIFTMAPPER_CHALLENGE is set (spec §4.5, DRFT-66), the CI producer
+// first redeems it — binding the repository to an org — before
 // registering. This is still a write, not a read: see maybeAuthorize and
 // its own doc comment for why it's folded into register rather than a
-// separate command, and how its failure modes are handled.
+// separate command, and how its failure modes are handled. The declared
+// producer (a human-authenticated laptop, no CI) has no equivalent: org
+// membership itself is the authorization, resolved from `driftmapper
+// login` plus DRIFTMAPPER_ORG (see resolveOrg).
 //
 // `compare` (spec DRFT-50) is a pure browser launcher for the SPA compare
-// view (DRFT-29), dispatched on before
-// the default action's own flag.Parse() ever runs — see runCompare and
-// internal/compare's doc comment for why it performs no network calls of
-// its own.
+// view (DRFT-29); `login`/`logout` (DRFT-30) manage the declared
+// producer's stored credential. All three are dispatched before the
+// default action's own flag.Parse() ever runs, so none can collide with
+// its flags (-output/-version/-json) — see runCompare/runLogin/runLogout
+// and internal/compare's/internal/deviceauth's doc comments for why each
+// performs no other network calls than the ones its name implies.
 package main
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -32,7 +40,10 @@ import (
 	"github.com/driftmapper/cli/internal/buildinfo"
 	"github.com/driftmapper/cli/internal/compare"
 	"github.com/driftmapper/cli/internal/config"
+	"github.com/driftmapper/cli/internal/deviceauth"
 	"github.com/driftmapper/cli/internal/oidcclient"
+
+	"github.com/driftmapper/protocol"
 )
 
 // version is overwritten via -ldflags at release time; DRFT-19 wires that
@@ -52,11 +63,18 @@ const name = "driftmapper"
 var browserOpen = browser.Open
 
 func main() {
-	// Dispatched before flag.Parse() below, so "compare" can never collide
-	// with the default action's own flags (-output/-version/-json), which
-	// are all single-token and never equal to a bare subcommand name.
-	if len(os.Args) > 1 && os.Args[1] == "compare" {
-		os.Exit(runCompare(context.Background(), os.Args[2:], os.Stdout, os.Stderr))
+	// Dispatched before flag.Parse() below, so a subcommand can never
+	// collide with the default action's own flags (-output/-version/-json),
+	// which are all single-token and never equal to a bare subcommand name.
+	if len(os.Args) > 1 {
+		switch os.Args[1] {
+		case "compare":
+			os.Exit(runCompare(context.Background(), os.Args[2:], os.Stdout, os.Stderr))
+		case "login":
+			os.Exit(runLogin(context.Background(), os.Stdout, os.Stderr))
+		case "logout":
+			os.Exit(runLogout(os.Stdout, os.Stderr))
+		}
 	}
 
 	output := flag.String("output", "", "path to write build-info.html (default: $DRIFTMAPPER_BUILD_INFO_FILE, or build-info.html)")
@@ -82,7 +100,28 @@ func main() {
 	}
 }
 
+// run dispatches to the CI (verified) or declared producer per DRFT-129's
+// "smart enough" principle: OIDC when ACTIONS_ID_TOKEN_REQUEST_URL is set
+// (a workload token is only ever obtainable inside a job that requested
+// `id-token: write` — its presence is a reliable "we're in CI" signal, not
+// a guess), the stored device-code credential otherwise. Both producers
+// converge on the same output: a Build response written to build-info.html
+// via buildinfo.Generate.
 func run(ctx context.Context, output string) error {
+	if output == "" {
+		output = config.BuildInfoFile()
+	}
+	if os.Getenv("ACTIONS_ID_TOKEN_REQUEST_URL") != "" {
+		return runVerified(ctx, output)
+	}
+	return runDeclared(ctx, output)
+}
+
+// runVerified is the CI producer — unchanged in shape from before
+// DRFT-129, except buildcontext.FromGitHubActions now also submits
+// repository/ref (confirmed against the token's claims server-side, never
+// trusted from here — see that package's doc comment).
+func runVerified(ctx context.Context, output string) error {
 	token, err := oidcclient.AcquireGitHubActionsToken(ctx, config.OIDCAudience())
 	if err != nil {
 		return fmt.Errorf("acquire OIDC token: %w", err)
@@ -102,20 +141,92 @@ func run(ctx context.Context, output string) error {
 	if err != nil {
 		return registerBuildError(err)
 	}
+	return writeBuildInfo(output, build, created)
+}
 
-	if output == "" {
-		output = config.BuildInfoFile()
+// runDeclared is the laptop producer (DRFT-124/DRFT-129): a human-
+// authenticated write with no CI at all. Requires a prior `driftmapper
+// login` — see deviceauth.AccessToken's ErrNotLoggedIn for the error
+// surfaced here when that hasn't happened yet.
+func runDeclared(ctx context.Context, output string) error {
+	token, err := deviceauth.AccessToken(ctx, config.HubURL())
+	if err != nil {
+		return err
 	}
+
+	reg, err := buildcontext.FromGit()
+	if err != nil {
+		return fmt.Errorf("gather build context: %w", err)
+	}
+
+	client := apiclient.New(config.APIURL(), token)
+	orgSlug, err := resolveOrg(ctx, client)
+	if err != nil {
+		return err
+	}
+
+	idempotencyKey, err := newIdempotencyKey()
+	if err != nil {
+		return fmt.Errorf("generate idempotency key: %w", err)
+	}
+
+	build, created, err := client.RegisterDeclaredBuild(ctx, orgSlug, idempotencyKey, reg)
+	if err != nil {
+		return fmt.Errorf("register build: %w", err)
+	}
+	return writeBuildInfo(output, build, created)
+}
+
+func writeBuildInfo(output string, build protocol.Build, created bool) error {
 	if err := buildinfo.Generate(output, build); err != nil {
 		return fmt.Errorf("write %s: %w", output, err)
 	}
-
 	verb := "Registered"
 	if !created {
 		verb = "Already registered (idempotent retry)"
 	}
 	fmt.Printf("%s build %s -> %s\n", verb, build.BuildInstanceId, output)
 	return nil
+}
+
+// resolveOrg picks which org a declared registration attributes to:
+// DRIFTMAPPER_ORG if set, the caller's sole org if they belong to exactly
+// one, or a clear "pick one" error listing every slug otherwise — guessing
+// wrong here would silently attribute a build to the wrong team, so an
+// ambiguous case is always an error, never a default.
+func resolveOrg(ctx context.Context, client *apiclient.Client) (string, error) {
+	if slug := config.Org(); slug != "" {
+		return slug, nil
+	}
+	orgs, err := client.ListOrgs(ctx)
+	if err != nil {
+		return "", fmt.Errorf("list orgs: %w", err)
+	}
+	switch len(orgs) {
+	case 0:
+		return "", fmt.Errorf("your account has no organizations to register a build against")
+	case 1:
+		return orgs[0].Slug, nil
+	default:
+		slugs := make([]string, len(orgs))
+		for i, o := range orgs {
+			slugs[i] = o.Slug
+		}
+		return "", fmt.Errorf("you belong to more than one organization — set DRIFTMAPPER_ORG to one of: %v", slugs)
+	}
+}
+
+// newIdempotencyKey mints a per-invocation retry key for
+// RegisterDeclaredBuild (spec §2.5a never applied to this producer — see
+// that method's doc comment). 16 random bytes is far more than needed to
+// avoid collision within one org's history; the shape doesn't matter since
+// callers must treat it as opaque either way.
+func newIdempotencyKey() (string, error) {
+	b := make([]byte, 16)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(b), nil
 }
 
 // registerBuildError wraps a RegisterBuild failure. DRFT-80: registration
@@ -171,6 +282,30 @@ func maybeAuthorize(ctx context.Context, w io.Writer, client *apiclient.Client, 
 	fmt.Fprintf(w, "Authorized repository %s for org %s (challenge redeemed) — you can now remove DRIFTMAPPER_CHALLENGE\n",
 		auth.RepositoryId, auth.OrganizationId)
 	return nil
+}
+
+// runLogin implements `driftmapper login` (DRFT-30): the declared
+// producer's device-code pairing. See internal/deviceauth.Login for the
+// actual flow; this just wires it to stdout/the real browser launcher and
+// maps the result to an exit code.
+func runLogin(ctx context.Context, stdout, stderr io.Writer) int {
+	if err := deviceauth.Login(ctx, config.HubURL(), browserOpen, stdout); err != nil {
+		fmt.Fprintln(stderr, "driftmapper:", err)
+		return 1
+	}
+	return 0
+}
+
+// runLogout implements `driftmapper logout`: deletes the stored device-code
+// credential. Idempotent — logging out twice, or logging out having never
+// logged in, are both just "nothing to do" (see deviceauth.Clear).
+func runLogout(stdout, stderr io.Writer) int {
+	if err := deviceauth.Clear(); err != nil {
+		fmt.Fprintln(stderr, "driftmapper:", err)
+		return 1
+	}
+	fmt.Fprintln(stdout, "Logged out.")
+	return 0
 }
 
 // runCompare implements `driftmapper compare <build-id-a> <build-id-b>`

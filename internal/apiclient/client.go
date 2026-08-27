@@ -1,8 +1,9 @@
 // Package apiclient is a minimal client for the CLI's public-tier operations
-// (spec §5.2a/§4.5): POST /v1/builds and POST /v1/repositories/authorize. It
-// speaks the {"data"}/{"error"} response envelope documented in
-// driftmapper/protocol's openapi.yaml — protocol's generated types cover
-// the resource shapes but not the envelope itself, so it's unwrapped here.
+// (spec §5.2a/§4.5): POST /v1/builds, POST /v1/orgs/{slug}/builds (DRFT-129),
+// and POST /v1/repositories/authorize. It speaks the {"data"}/{"error"}
+// response envelope documented in driftmapper/protocol's openapi.yaml —
+// protocol's generated types cover the resource shapes but not the envelope
+// itself, so it's unwrapped here.
 package apiclient
 
 import (
@@ -12,6 +13,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"slices"
 	"strings"
 
@@ -100,16 +102,63 @@ func (c *Client) AuthorizeRepository(ctx context.Context, challenge string) (pro
 	return auth, nil
 }
 
+// ListOrgs calls GET /v1/orgs — dashboard-tier (protocol openapi.yaml), not
+// public, but usable here all the same: the tier only governs the
+// compatibility-window guarantee, not who may call an operation. Used
+// exactly once, interactively, at `driftmapper login` time to resolve
+// which org a declared registration should default to when
+// DRIFTMAPPER_ORG isn't set — never on the pinned CI path, which has no
+// use for it at all (a workload OIDC token resolves its org from the
+// token's own trusted-workload policy, never this).
+func (c *Client) ListOrgs(ctx context.Context) ([]protocol.OrgWithRole, error) {
+	data, _, err := c.do(ctx, http.MethodGet, "/v1/orgs", nil, nil, http.StatusOK)
+	if err != nil {
+		return nil, err
+	}
+	var orgs []protocol.OrgWithRole
+	if err := json.Unmarshal(data, &orgs); err != nil {
+		return nil, fmt.Errorf("decode orgs: %w", err)
+	}
+	return orgs, nil
+}
+
+// RegisterDeclaredBuild calls POST /v1/orgs/{orgSlug}/builds (DRFT-124/
+// DRFT-129) — the declared (non-CI) producer's registration, authenticated
+// with a human bearer token (device-code login, internal/deviceauth)
+// instead of a workload OIDC token. idempotencyKey stands in for the
+// content-address tuple registerBuild uses (spec §2.5a never applied to
+// this producer — there's no run_id/run_attempt to build one from): an
+// identical key within the same org resolves to the existing build (200),
+// exactly like a content-addressed retry does on RegisterBuild.
+func (c *Client) RegisterDeclaredBuild(ctx context.Context, orgSlug, idempotencyKey string, reg protocol.BuildRegistration) (build protocol.Build, created bool, err error) {
+	data, status, err := c.doJSONHeaders(ctx, "/v1/orgs/"+url.PathEscape(orgSlug)+"/builds", reg,
+		map[string]string{"Idempotency-Key": idempotencyKey}, http.StatusOK, http.StatusCreated)
+	if err != nil {
+		return protocol.Build{}, false, err
+	}
+	if err := json.Unmarshal(data, &build); err != nil {
+		return protocol.Build{}, false, fmt.Errorf("decode build (status %d): %w", status, err)
+	}
+	return build, status == http.StatusCreated, nil
+}
+
 // doJSON POSTs body as JSON to path and unwraps the {"data"}/{"error"}
 // envelope every cmd/api response uses. On any status not in okStatuses, it
 // returns *Error with the server's structured code/message/details; on
 // success it returns the raw `data` field for the caller to unmarshal into
 // its own operation-specific type.
 func (c *Client) doJSON(ctx context.Context, path string, body any, okStatuses ...int) (data json.RawMessage, status int, err error) {
-	return c.do(ctx, http.MethodPost, path, body, okStatuses...)
+	return c.do(ctx, http.MethodPost, path, body, nil, okStatuses...)
 }
 
-func (c *Client) do(ctx context.Context, method, path string, body any, okStatuses ...int) (data json.RawMessage, status int, err error) {
+// doJSONHeaders is doJSON plus extra request headers — currently only
+// registerDeclaredBuild's Idempotency-Key, which every other operation has
+// no use for.
+func (c *Client) doJSONHeaders(ctx context.Context, path string, body any, headers map[string]string, okStatuses ...int) (data json.RawMessage, status int, err error) {
+	return c.do(ctx, http.MethodPost, path, body, headers, okStatuses...)
+}
+
+func (c *Client) do(ctx context.Context, method, path string, body any, headers map[string]string, okStatuses ...int) (data json.RawMessage, status int, err error) {
 	var reqBody io.Reader
 	if body != nil {
 		marshaled, err := json.Marshal(body)
@@ -126,6 +175,9 @@ func (c *Client) do(ctx context.Context, method, path string, body any, okStatus
 	req.Header.Set("Authorization", "Bearer "+c.token)
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
+	}
+	for k, v := range headers {
+		req.Header.Set(k, v)
 	}
 
 	resp, err := c.http.Do(req)
