@@ -90,11 +90,29 @@ logout` deletes the stored credential.
 If you belong to more than one organization, set `DRIFTMAPPER_ORG` to the slug a declared
 build should attribute to — `driftmapper` won't guess.
 
+### Testing against a non-production deployment
+
+`DRIFTMAPPER_API_URL` and `DRIFTMAPPER_HUB_URL` point the CLI at any deployment, not just the
+production default — this is how to validate a change (CLI or server) against staging before
+it reaches prod:
+
+```bash
+export DRIFTMAPPER_API_URL=https://api-stg.driftmapper.io/api
+export DRIFTMAPPER_HUB_URL=https://hub-stg.driftmapper.io
+driftmapper login && driftmapper
+```
+
+Both must be set together — `login`'s device-code pairing and every subsequent registration
+have to land on the same deployment, or the credential `login` stores won't be honored by the
+API you point registration at. There's no single "use staging" switch on purpose: it's two
+independent overrides of the same zero-config mechanism every other env var here uses, not a
+special case.
+
 ### Environment variables
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `DRIFTMAPPER_API_URL` | `https://api.driftmapper.io` | API base URL |
+| `DRIFTMAPPER_API_URL` | `https://api.driftmapper.io/api` | API base URL — must include the `/api` prefix `cmd/api` mounts its routes under (an override for a non-default deployment needs it too, e.g. `https://api-stg.example.com/api`) |
 | `DRIFTMAPPER_HUB_URL` | `https://hub.driftmapper.io` | Base URL `login`/`logout` talk to for device-code pairing |
 | `DRIFTMAPPER_OIDC_AUDIENCE` | `https://driftmapper.io` | `aud` claim requested from the CI provider |
 | `DRIFTMAPPER_BUILD_INFO_FILE` | `build-info.html` | Output path (overridable per-run via `--output`) |

@@ -6,13 +6,21 @@ package config
 import "os"
 
 const (
-	defaultAPIURL        = "https://api.driftmapper.io"
+	// defaultAPIURL includes the /api prefix deliberately: cmd/api mounts
+	// its whole bearer-token JSON surface under a stripped /api/ (see
+	// driftmapper/server's cmd/api/main.go), so the real request path is
+	// always /api/v1/..., never bare /v1/.... driftmapper/static's
+	// dashboard documents the same convention for its own backend config
+	// (backend.config.ts: "origin + /api"). A DRIFTMAPPER_API_URL override
+	// must include /api too, for the same reason.
+	defaultAPIURL        = "https://api.driftmapper.io/api"
 	defaultHubURL        = "https://hub.driftmapper.io"
 	defaultOIDCAudience  = "https://driftmapper.io" // matches server's OIDC_AUDIENCE default
 	defaultBuildInfoFile = "build-info.html"
 )
 
-// APIURL is the Driftmapper API's base URL.
+// APIURL is the Driftmapper API's base URL, including the /api prefix
+// cmd/api mounts its routes under — see defaultAPIURL's doc comment.
 func APIURL() string {
 	return orDefault("DRIFTMAPPER_API_URL", defaultAPIURL)
 }
