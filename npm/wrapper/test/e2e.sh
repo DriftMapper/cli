@@ -82,16 +82,14 @@ echo "==> piping does not wedge"
 "$CLI_BIN" --version | head -n1 >/dev/null
 
 echo "==> a missing CI environment fails clean and nonzero, not hung or silent"
-# DRFT-129: without ACTIONS_ID_TOKEN_REQUEST_URL the default action runs the
-# declared (laptop) producer, which needs a prior `driftmapper login` — so a
-# no-CI environment with no stored credential must fail fast with login
-# guidance, not hang or silently succeed. HOME points at a scratch dir so the
-# failure is the meaningful "not logged in" state, not a no-config-dir error.
+# DRFT-165: without ACTIONS_ID_TOKEN_REQUEST_URL there is no credential the
+# server accepts (builds are registered from CI only), so a no-CI environment
+# must fail fast saying so, not hang or silently succeed.
 if OUT="$(env -i PATH="$PATH" HOME="$WORK/home" "$CLI_BIN" 2>&1)"; then
   echo "FAIL: expected a nonzero exit with no GitHub Actions OIDC env vars set"
   exit 1
 fi
-echo "$OUT" | grep -qi "driftmapper login" || {
+echo "$OUT" | grep -qi "registered from CI only" || {
   echo "FAIL: missing-CI error was not actionable: $OUT"
   exit 1
 }
