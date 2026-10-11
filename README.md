@@ -4,8 +4,8 @@ The Driftmapper CLI: registers a build so Driftmapper can track it, and writes
 `build-info.html` from the response. The default action is write-only, and picks its
 producer automatically: inside CI (a workload OIDC token is available) it registers a
 *verified* build; on a laptop with no CI at all, after `driftmapper login` (see below), it
-registers a *declared* one instead — same output, self-reported rather than confirmed
-against a token. `compare` is a separate subcommand, a browser launcher with zero network
+registers a *local build* instead — same output, but attributed to you (the signed-in
+person) and never to a repository, since there is no token to confirm one against. `compare` is a separate subcommand, a browser launcher with zero network
 calls of its own, not a read command.
 
 ## Install and use
@@ -83,11 +83,11 @@ driftmapper          # from inside any git checkout, any time after
 same mechanism GitHub's own CLI uses) and stores the resulting credential in
 `~/.config/driftmapper/credentials.json`, mode `0600`. Every `driftmapper` invocation after
 that reads build identity straight from the local git checkout (`git remote`, `HEAD`, the
-current commit's author/committer) and registers a *declared* build — self-reported, not
-CI-confirmed, and labeled as such on the resolution page and builds list. `driftmapper
+current commit's author/committer) and registers a *local build* — attributed to you, not
+to a repository, and labeled "built locally, not from CI" on the resolution page and builds list. `driftmapper
 logout` deletes the stored credential.
 
-If you belong to more than one organization, set `DRIFTMAPPER_ORG` to the slug a declared
+If you belong to more than one organization, set `DRIFTMAPPER_ORG` to the slug a local
 build should attribute to — `driftmapper` won't guess.
 
 ### Testing against a non-production deployment

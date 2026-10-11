@@ -15,9 +15,11 @@ picks its producer automatically (DRFT-124/DRFT-129, spec §5.2a's "smart enough
   binding the repository to an org — before registering; still a write, not a read. See
   "Gotcha — challenge redemption is folded into the default action, not a separate command"
   below.
-- **Declared** — a laptop with no CI at all, after `driftmapper login` (DRFT-30): read build
-  identity straight from the local git checkout (`internal/gitcontext`), `POST
-  /v1/orgs/{slug}/builds`, self-reported and org-attributed rather than token-confirmed. See
+- **Declared (a "local build", DRFT-165)** — a laptop with no CI at all, after `driftmapper login`
+  (DRFT-30): read build identity straight from the local git checkout (`internal/gitcontext`),
+  `POST /v1/orgs/{slug}/builds`. Attributed to the signed-in person by the server and **never to a
+  repository**: `buildcontext.ForLocalBuild` clears the git-remote `repository` before sending
+  (the CI producer keeps it, and the server confirms it against the token). See
   "Gotcha — two producers, one output shape" below.
 
 `compare` (spec DRFT-50, superseding DRFT-26) is a pure browser launcher for

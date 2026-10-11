@@ -154,7 +154,7 @@ func runDeclared(ctx context.Context, output string) error {
 		return err
 	}
 
-	reg, err := buildcontext.FromGit()
+	reg, err := buildcontext.ForLocalBuild()
 	if err != nil {
 		return fmt.Errorf("gather build context: %w", err)
 	}
@@ -184,6 +184,15 @@ func writeBuildInfo(output string, build protocol.Build, created bool) error {
 	verb := "Registered"
 	if !created {
 		verb = "Already registered (idempotent retry)"
+	}
+	if build.Attribution == protocol.Declared {
+		// A local build belongs to a person, never a repository (DRFT-165).
+		who := "you"
+		if build.RegisteredBy != nil {
+			who = *build.RegisteredBy
+		}
+		fmt.Printf("%s local build %s (attributed to %s, not to a repository) -> %s\n", verb, build.BuildInstanceId, who, output)
+		return nil
 	}
 	fmt.Printf("%s build %s -> %s\n", verb, build.BuildInstanceId, output)
 	return nil

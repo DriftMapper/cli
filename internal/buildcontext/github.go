@@ -56,6 +56,22 @@ func FromGit() (protocol.BuildRegistration, error) {
 	return reg, nil
 }
 
+// ForLocalBuild is FromGit for the laptop producer (a "local build", DRFT-165),
+// with one deliberate difference: it never submits a repository. A local build
+// is attributed to the signed-in person, never to a repository — there is no
+// token to confirm a repository against, and a git remote someone typed into a
+// checkout must not make a laptop build read as if it belonged to a repo. The
+// CI producer keeps sending it (FromGitHubActions, via FromGit): there the server
+// confirms it against the verified token claims.
+func ForLocalBuild() (protocol.BuildRegistration, error) {
+	reg, err := FromGit()
+	if err != nil {
+		return protocol.BuildRegistration{}, err
+	}
+	reg.Repository = nil
+	return reg, nil
+}
+
 // FromGitHubActions builds a BuildRegistration from the current GitHub
 // Actions job's environment, layered on top of FromGit's local-checkout
 // base (repository/ref/author/committer — actions/checkout leaves a real
