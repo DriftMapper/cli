@@ -25,27 +25,14 @@ func APIURL() string {
 	return orDefault("DRIFTMAPPER_API_URL", defaultAPIURL)
 }
 
-// HubURL is cmd/hub's base URL — DRFT-30/DRFT-129's device-code login
-// (`driftmapper login`) talks to it directly, not to APIURL: the
-// device-code endpoints (POST /device/code, /device/token, /device/refresh)
-// and the browser approval page (GET /device) all live on hub, which is
-// also where the dashboard SPA's own bearer-minting endpoint
-// (POST /session/api-token, DRFT-114) already lives — see internal/deviceauth.
+// HubURL is cmd/hub's base URL — the device-code login (`driftmapper login`,
+// DRFT-30) talks to it directly, not to APIURL: the device-code endpoints
+// (POST /device/code, /device/token, /device/refresh) and the browser approval
+// page (GET /device) all live on hub, which is also where the dashboard SPA's
+// own bearer-minting endpoint (POST /session/api-token, DRFT-114) already
+// lives — see internal/deviceauth.
 func HubURL() string {
 	return orDefault("DRIFTMAPPER_HUB_URL", defaultHubURL)
-}
-
-// Org is the org slug `driftmapper login`-authenticated registrations
-// (the declared/non-CI producer, DRFT-129) attribute a build to —
-// POST /v1/orgs/{slug}/builds is org-scoped by URL, unlike the workload-OIDC
-// path, which resolves its org from the token's own trusted-workload
-// policy and never needs this. Deliberately no default: a signed-in human
-// may belong to more than one org, and guessing wrong silently attributes
-// a build to the wrong team. Empty means "let the caller resolve it" —
-// e.g. by listing the user's orgs and requiring an explicit choice when
-// there's more than one.
-func Org() string {
-	return os.Getenv("DRIFTMAPPER_ORG")
 }
 
 // OIDCAudience is the `aud` claim requested from the CI provider's OIDC

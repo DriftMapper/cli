@@ -1,12 +1,11 @@
 # driftmapper/cli
 
 The Driftmapper CLI: registers a build so Driftmapper can track it, and writes
-`build-info.html` from the response. The default action is write-only, and picks its
-producer automatically: inside CI (a workload OIDC token is available) it registers a
-*verified* build; on a laptop with no CI at all, after `driftmapper login` (see below), it
-registers a *declared* one instead — same output, self-reported rather than confirmed
-against a token. `compare` is a separate subcommand, a browser launcher with zero network
-calls of its own, not a read command.
+`build-info.html` from the response. The default action is write-only and runs in CI: it
+registers the build with the CI provider's workload OIDC token, the only credential the
+server accepts for registration. `compare` is a separate subcommand, a browser launcher with
+zero network calls of its own, not a read command. `login`/`logout` sign you in as yourself
+(see below).
 
 ## Install and use
 
@@ -72,23 +71,19 @@ be launched (headless/SSH), the URL is printed to stdout instead so it's still u
 `compare` makes no network calls and requires `DRIFTMAPPER_DASHBOARD_URL` — there's no default
 dashboard origin yet.
 
-### Registering a build with no CI at all
+### Signing in as yourself
 
 ```bash
 driftmapper login    # once — opens your browser to approve this device
-driftmapper          # from inside any git checkout, any time after
+driftmapper logout   # deletes the stored credential
 ```
 
 `driftmapper login` pairs this machine with your Driftmapper account (device-code login,
 same mechanism GitHub's own CLI uses) and stores the resulting credential in
-`~/.config/driftmapper/credentials.json`, mode `0600`. Every `driftmapper` invocation after
-that reads build identity straight from the local git checkout (`git remote`, `HEAD`, the
-current commit's author/committer) and registers a *declared* build — self-reported, not
-CI-confirmed, and labeled as such on the resolution page and builds list. `driftmapper
-logout` deletes the stored credential.
-
-If you belong to more than one organization, set `DRIFTMAPPER_ORG` to the slug a declared
-build should attribute to — `driftmapper` won't guess.
+`~/.config/driftmapper/credentials.json`, mode `0600`. It is how the CLI acts as *you* rather
+than as a CI pipeline, for commands that read your organization's data. Registering a build is
+not one of them: a build is registered from CI with the pipeline's OIDC token, and `driftmapper`
+outside CI fails saying so.
 
 ### Testing against a non-production deployment
 
@@ -99,12 +94,11 @@ it reaches prod:
 ```bash
 export DRIFTMAPPER_API_URL=https://api-stg.driftmapper.io/api
 export DRIFTMAPPER_HUB_URL=https://hub-stg.driftmapper.io
-driftmapper login && driftmapper
+driftmapper login
 ```
 
-Both must be set together — `login`'s device-code pairing and every subsequent registration
-have to land on the same deployment, or the credential `login` stores won't be honored by the
-API you point registration at. There's no single "use staging" switch on purpose: it's two
+Both must be set together — `login`'s device-code pairing and every command that uses the
+credential it stores have to land on the same deployment, or the API won't honor it. There's no single "use staging" switch on purpose: it's two
 independent overrides of the same zero-config mechanism every other env var here uses, not a
 special case.
 
@@ -117,8 +111,7 @@ special case.
 | `DRIFTMAPPER_OIDC_AUDIENCE` | `https://driftmapper.io` | `aud` claim requested from the CI provider |
 | `DRIFTMAPPER_BUILD_INFO_FILE` | `build-info.html` | Output path (overridable per-run via `--output`) |
 | `DRIFTMAPPER_DASHBOARD_URL` | — | Dashboard SPA origin `compare` opens (required for `compare`; no default) |
-| `DRIFTMAPPER_CHALLENGE` | — | Single-use repository-authorization value (see "Authorizing a new repository" above); never a flag; CI producer only |
-| `DRIFTMAPPER_ORG` | — | Org slug a declared (non-CI) build attributes to; required only if you belong to more than one org |
+| `DRIFTMAPPER_CHALLENGE` | — | Single-use repository-authorization value (see "Authorizing a new repository" above); never a flag |
 | `DRIFTMAPPER_CONFIG_DIR` | XDG config dir | Where `login` stores its credential file |
 | `DRIFTMAPPER_BINARY_PATH` | — | Absolute path to a binary the npm launcher should run instead of resolving one |
 
