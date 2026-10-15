@@ -18,8 +18,8 @@ func TestFromGitHubActions_PopulatesCLISubmittedFieldsOnly(t *testing.T) {
 	if err != nil {
 		t.Fatalf("FromGitHubActions: %v", err)
 	}
-	if reg.CommitSha != "deadbeef" {
-		t.Errorf("CommitSha = %q, want %q", reg.CommitSha, "deadbeef")
+	if reg.CommitSha == nil || *reg.CommitSha != "deadbeef" {
+		t.Errorf("CommitSha = %v, want %q", reg.CommitSha, "deadbeef")
 	}
 	if reg.TriggerEvent == nil || *reg.TriggerEvent != "push" {
 		t.Errorf("TriggerEvent = %v, want \"push\"", reg.TriggerEvent)

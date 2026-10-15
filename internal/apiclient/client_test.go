@@ -10,6 +10,10 @@ import (
 	"github.com/driftmapper/protocol"
 )
 
+// testSHA is the commit_sha the tests submit; BuildRegistration.CommitSha is a
+// pointer since protocol v0.22.0 (the token supplies it when it can).
+var testSHA = "abc123"
+
 func TestRegisterBuild_Success(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if got := r.Header.Get("Authorization"); got != "Bearer tok" {
@@ -19,8 +23,8 @@ func TestRegisterBuild_Success(t *testing.T) {
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			t.Fatalf("decode request body: %v", err)
 		}
-		if body.CommitSha != "abc123" {
-			t.Errorf("request commit_sha = %q, want %q", body.CommitSha, "abc123")
+		if body.CommitSha == nil || *body.CommitSha != "abc123" {
+			t.Errorf("request commit_sha = %v, want %q", body.CommitSha, "abc123")
 		}
 
 		resolutionURL := "https://driftmapper.test/r/build1"
@@ -36,7 +40,7 @@ func TestRegisterBuild_Success(t *testing.T) {
 	defer srv.Close()
 
 	client := New(srv.URL, "tok")
-	build, created, err := client.RegisterBuild(context.Background(), protocol.BuildRegistration{CommitSha: "abc123"})
+	build, created, err := client.RegisterBuild(context.Background(), protocol.BuildRegistration{CommitSha: &testSHA})
 	if err != nil {
 		t.Fatalf("RegisterBuild: %v", err)
 	}
@@ -59,7 +63,7 @@ func TestRegisterBuild_IdempotentRetryReturns200NotCreated(t *testing.T) {
 	defer srv.Close()
 
 	client := New(srv.URL, "tok")
-	_, created, err := client.RegisterBuild(context.Background(), protocol.BuildRegistration{CommitSha: "abc123"})
+	_, created, err := client.RegisterBuild(context.Background(), protocol.BuildRegistration{CommitSha: &testSHA})
 	if err != nil {
 		t.Fatalf("RegisterBuild: %v", err)
 	}
@@ -86,7 +90,7 @@ func TestRegisterBuild_ClaimMismatchSurfacesStructuredDetails(t *testing.T) {
 	defer srv.Close()
 
 	client := New(srv.URL, "tok")
-	_, _, err := client.RegisterBuild(context.Background(), protocol.BuildRegistration{CommitSha: "abc123"})
+	_, _, err := client.RegisterBuild(context.Background(), protocol.BuildRegistration{CommitSha: &testSHA})
 	if err == nil {
 		t.Fatal("RegisterBuild: want error, got nil")
 	}
@@ -115,7 +119,7 @@ func TestRegisterBuild_UnknownFieldRejection(t *testing.T) {
 	defer srv.Close()
 
 	client := New(srv.URL, "tok")
-	_, _, err := client.RegisterBuild(context.Background(), protocol.BuildRegistration{CommitSha: "abc123"})
+	_, _, err := client.RegisterBuild(context.Background(), protocol.BuildRegistration{CommitSha: &testSHA})
 	apiErr, ok := err.(*Error)
 	if !ok {
 		t.Fatalf("err is %T, want *apiclient.Error", err)
