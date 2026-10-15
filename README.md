@@ -110,6 +110,8 @@ special case.
 | `DRIFTMAPPER_HUB_URL` | `https://hub.driftmapper.io` | Base URL `login`/`logout` talk to for device-code pairing |
 | `DRIFTMAPPER_OIDC_AUDIENCE` | `https://driftmapper.io` | `aud` claim requested from the CI provider |
 | `DRIFTMAPPER_BUILD_INFO_FILE` | `build-info.html` | Output path (overridable per-run via `--output`) |
+| `DRIFTMAPPER_APP` | repository name | App the build belongs to (overridable per-run via `--app`) |
+| `DRIFTMAPPER_MODULE` | the app name | Module within the app (overridable per-run via `--module`). A repository that builds several components runs the CLI once per module |
 | `DRIFTMAPPER_DASHBOARD_URL` | — | Dashboard SPA origin `compare` opens (required for `compare`; no default) |
 | `DRIFTMAPPER_CHALLENGE` | — | Single-use repository-authorization value (see "Authorizing a new repository" above); never a flag |
 | `DRIFTMAPPER_CONFIG_DIR` | XDG config dir | Where `login` stores its credential file |
