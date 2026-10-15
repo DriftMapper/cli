@@ -72,6 +72,18 @@ func Challenge() string {
 	return os.Getenv("DRIFTMAPPER_CHALLENGE")
 }
 
+// App is the app name to register builds under (DRFT-188), from
+// DRIFTMAPPER_APP. Empty means "let the server default it to the repository name".
+func App() string {
+	return os.Getenv("DRIFTMAPPER_APP")
+}
+
+// Module is the module name within the app, from DRIFTMAPPER_MODULE. Empty means
+// "let the server default it to the app name".
+func Module() string {
+	return os.Getenv("DRIFTMAPPER_MODULE")
+}
+
 func orDefault(env, def string) string {
 	if v := os.Getenv(env); v != "" {
 		return v

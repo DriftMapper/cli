@@ -73,6 +73,8 @@ func main() {
 	}
 
 	output := flag.String("output", "", "path to write build-info.html (default: $DRIFTMAPPER_BUILD_INFO_FILE, or build-info.html)")
+	app := flag.String("app", "", "app to register the build under (default: $DRIFTMAPPER_APP, or the repository name)")
+	module := flag.String("module", "", "module within the app (default: $DRIFTMAPPER_MODULE, or the app name)")
 	showVersion := flag.Bool("version", false, "print the version and exit")
 	asJSON := flag.Bool("json", false, "with -version, print {\"name\",\"version\"} as JSON instead of plain text")
 	flag.Parse()
@@ -89,7 +91,7 @@ func main() {
 		return
 	}
 
-	if err := run(context.Background(), *output); err != nil {
+	if err := run(context.Background(), *output, *app, *module); err != nil {
 		fmt.Fprintln(os.Stderr, "driftmapper:", err)
 		os.Exit(1)
 	}
@@ -100,21 +102,21 @@ func main() {
 // being unset means we are not in a CI job and there is no credential the server
 // would accept: say so rather than fail on a missing token. The Build response
 // is written to build-info.html via buildinfo.Generate.
-func run(ctx context.Context, output string) error {
+func run(ctx context.Context, output, app, module string) error {
 	if output == "" {
 		output = config.BuildInfoFile()
 	}
 	if os.Getenv("ACTIONS_ID_TOKEN_REQUEST_URL") == "" {
 		return errors.New("builds are registered from CI only: no GitHub Actions OIDC token is available here (the job needs `permissions: id-token: write`)")
 	}
-	return runVerified(ctx, output)
+	return runVerified(ctx, output, app, module)
 }
 
 // runVerified registers a build with the CI provider's workload OIDC token.
 // buildcontext.FromGitHubActions also submits repository/ref (confirmed
 // against the token's claims server-side, never trusted from here — see that
 // package's doc comment).
-func runVerified(ctx context.Context, output string) error {
+func runVerified(ctx context.Context, output, app, module string) error {
 	token, err := oidcclient.AcquireGitHubActionsToken(ctx, config.OIDCAudience())
 	if err != nil {
 		return fmt.Errorf("acquire OIDC token: %w", err)
@@ -124,6 +126,8 @@ func runVerified(ctx context.Context, output string) error {
 	if err != nil {
 		return fmt.Errorf("gather build context: %w", err)
 	}
+
+	setNames(&reg, app, module)
 
 	client := apiclient.New(config.APIURL(), token)
 	if err := maybeAuthorize(ctx, os.Stdout, client, config.Challenge()); err != nil {
@@ -137,15 +141,33 @@ func runVerified(ctx context.Context, output string) error {
 	return writeBuildInfo(output, build, created)
 }
 
+// setNames sets the registration's app and module (DRFT-188). The flag wins over
+// the environment variable; with neither, the fields are omitted and the server
+// defaults the app to the repository name and the module to the app name.
+func setNames(reg *protocol.BuildRegistration, app, module string) {
+	if app == "" {
+		app = config.App()
+	}
+	if module == "" {
+		module = config.Module()
+	}
+	if app != "" {
+		reg.App = &app
+	}
+	if module != "" {
+		reg.Module = &module
+	}
+}
+
 func writeBuildInfo(output string, build protocol.Build, created bool) error {
 	if err := buildinfo.Generate(output, build); err != nil {
 		return fmt.Errorf("write %s: %w", output, err)
 	}
 	verb := "Registered"
 	if !created {
-		verb = "Already registered (idempotent retry)"
+		verb = "Already registered (same module and commit)"
 	}
-	fmt.Printf("%s build %s -> %s\n", verb, build.BuildInstanceId, output)
+	fmt.Printf("%s build %s (%s/%s) -> %s\n", verb, build.BuildInstanceId, build.App, build.Module, output)
 	return nil
 }
 
