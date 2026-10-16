@@ -11,9 +11,12 @@
 // its own doc comment for why it's folded into register rather than a
 // separate command, and how its failure modes are handled.
 //
+// `record` (DRFT-185) records, from CI, that a build is now in an environment: a
+// claim by the pipeline, authenticated by the same workload token, see runRecord.
+//
 // `compare` (spec DRFT-50) is a pure browser launcher for the SPA compare
 // view (DRFT-29); `login`/`logout` (DRFT-30) manage the signed-in user's
-// stored device-code credential. All three are dispatched before the default
+// stored device-code credential. All four are dispatched before the default
 // action's own flag.Parse() ever runs, so none can collide with its flags
 // (-output/-version/-json) — see runCompare/runLogin/runLogout and
 // internal/compare's/internal/deviceauth's doc comments for why each performs
@@ -65,6 +68,8 @@ func main() {
 		switch os.Args[1] {
 		case "compare":
 			os.Exit(runCompare(context.Background(), os.Args[2:], os.Stdout, os.Stderr))
+		case "record":
+			os.Exit(runRecord(context.Background(), os.Args[2:], os.Stdout, os.Stderr))
 		case "login":
 			os.Exit(runLogin(context.Background(), os.Stdout, os.Stderr))
 		case "logout":
