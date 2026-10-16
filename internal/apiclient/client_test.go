@@ -3,6 +3,7 @@ package apiclient
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -204,5 +205,49 @@ func TestAuthorizeRepository_ErrorCodes(t *testing.T) {
 				t.Errorf("StatusCode = %d, want %d", apiErr.StatusCode, tc.status)
 			}
 		})
+	}
+}
+
+func TestRecordDeployment_CreatedAndAlreadyRecorded(t *testing.T) {
+	for _, tc := range []struct {
+		status  int
+		created bool
+	}{{http.StatusCreated, true}, {http.StatusOK, false}} {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path != "/v1/deployments" {
+				t.Errorf("path = %q, want /v1/deployments", r.URL.Path)
+			}
+			if got := r.Header.Get("Authorization"); got != "Bearer tok" {
+				t.Errorf("Authorization = %q", got)
+			}
+			var body map[string]any
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Fatal(err)
+			}
+			if body["environment"] != "production" || len(body) != 1 {
+				t.Errorf("body = %v, want only environment", body)
+			}
+			w.WriteHeader(tc.status)
+			json.NewEncoder(w).Encode(map[string]any{"data": protocol.Deployment{Environment: "production", BuildInstanceId: "b1"}})
+		}))
+		env := "production"
+		dep, created, err := New(srv.URL, "tok").RecordDeployment(context.Background(), protocol.DeploymentRequest{Environment: &env})
+		srv.Close()
+		if err != nil || created != tc.created || dep.BuildInstanceId != "b1" {
+			t.Errorf("status %d: dep=%+v created=%v err=%v", tc.status, dep, created, err)
+		}
+	}
+}
+
+func TestRecordDeployment_ReturnsStructuredError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnprocessableEntity)
+		json.NewEncoder(w).Encode(map[string]any{"error": map[string]any{"code": "build_not_registered", "message": "none"}})
+	}))
+	defer srv.Close()
+	_, _, err := New(srv.URL, "tok").RecordDeployment(context.Background(), protocol.DeploymentRequest{})
+	var apiErr *Error
+	if !errors.As(err, &apiErr) || apiErr.Code != "build_not_registered" || apiErr.StatusCode != http.StatusUnprocessableEntity {
+		t.Fatalf("err = %v, want *Error build_not_registered 422", err)
 	}
 }
