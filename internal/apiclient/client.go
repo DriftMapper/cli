@@ -83,6 +83,21 @@ func (c *Client) RegisterBuild(ctx context.Context, reg protocol.BuildRegistrati
 	return build, status == http.StatusCreated, nil
 }
 
+// RecordDeployment calls POST /v1/deployments (DRFT-185): records, as a claim by
+// the pipeline, that a registered build is in an environment. created is false on
+// 200 (the same run already recorded it and the existing record is returned) and
+// true on 201. The time is the server's; the request has no field for one.
+func (c *Client) RecordDeployment(ctx context.Context, req protocol.DeploymentRequest) (dep protocol.Deployment, created bool, err error) {
+	data, status, err := c.doJSON(ctx, "/v1/deployments", req, http.StatusOK, http.StatusCreated)
+	if err != nil {
+		return protocol.Deployment{}, false, err
+	}
+	if err := json.Unmarshal(data, &dep); err != nil {
+		return protocol.Deployment{}, false, fmt.Errorf("decode deployment (status %d): %w", status, err)
+	}
+	return dep, status == http.StatusCreated, nil
+}
+
 // AuthorizeRepository calls POST /v1/repositories/authorize (spec §4.5,
 // DRFT-62/DRFT-66) — redeems challenge and, on success, returns confirmation
 // that the token's repository is now bound to an org. challenge is never

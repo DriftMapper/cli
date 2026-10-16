@@ -55,6 +55,33 @@ redeems. Running without a repository binding at all works fine too (spec §2.2a
 `DRIFTMAPPER_CHALLENGE` only needs to be set for the run that does the binding, whenever
 that happens to be.
 
+### Recording a deployment
+
+After the build job has registered a build, the job that deploys it records where it went:
+
+```yaml
+permissions:
+  id-token: write
+steps:
+  - run: npx @driftmapper/cli record --environment production
+```
+
+This is a claim by your pipeline that the build is now in that environment; Driftmapper
+sets the time and keeps a record per run, so a redeploy or rollback shows in the history.
+It does not check what is actually running. `record` takes one module — run it once per
+module in a monorepo.
+
+Which build is recorded: by default the module's build at the commit the job runs on, which
+is right when the deploy runs in the same workflow as the build. When the deploy job's commit is
+not the commit being deployed — a promotion, a `workflow_dispatch`, a `workflow_run` — name it:
+`--commit <sha>`, or `--build-id <id>`, the id registration printed and wrote into
+`build-info.html`. Carrying it to the deploy job is your pipeline's plumbing; a job output
+(`needs.build.outputs.id`) or a workflow input both work. `--url` records where the deployment
+serves its build-info (https only). If the job targets a GitHub `environment:`, `--environment`
+may be omitted: the environment comes from the token, and a value you pass must match it.
+
+Only the repository that registered a module can record deployments of it.
+
 ### Comparing two builds
 
 ```bash
@@ -110,6 +137,12 @@ special case.
 | `DRIFTMAPPER_HUB_URL` | `https://hub.driftmapper.io` | Base URL `login`/`logout` talk to for device-code pairing |
 | `DRIFTMAPPER_OIDC_AUDIENCE` | `https://driftmapper.io` | `aud` claim requested from the CI provider |
 | `DRIFTMAPPER_BUILD_INFO_FILE` | `build-info.html` | Output path (overridable per-run via `--output`) |
+| `DRIFTMAPPER_APP` | repository name | App the build belongs to (overridable per-run via `--app`) |
+| `DRIFTMAPPER_MODULE` | the app name | Module within the app (overridable per-run via `--module`). A repository that builds several components runs the CLI once per module |
+| `DRIFTMAPPER_ENVIRONMENT` | the CI job's environment | Environment `record` records into (overridable via `--environment`) |
+| `DRIFTMAPPER_COMMIT` | the job's commit | Commit of the build `record` records as deployed (overridable via `--commit`); exclusive with `DRIFTMAPPER_BUILD_ID` |
+| `DRIFTMAPPER_BUILD_ID` | — | Exact build `record` records, as printed at registration (overridable via `--build-id`) |
+| `DRIFTMAPPER_DEPLOYMENT_URL` | — | https URL where the deployment serves its build-info (overridable via `--url`) |
 | `DRIFTMAPPER_DASHBOARD_URL` | — | Dashboard SPA origin `compare` opens (required for `compare`; no default) |
 | `DRIFTMAPPER_CHALLENGE` | — | Single-use repository-authorization value (see "Authorizing a new repository" above); never a flag |
 | `DRIFTMAPPER_CONFIG_DIR` | XDG config dir | Where `login` stores its credential file |

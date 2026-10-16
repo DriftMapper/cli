@@ -3,12 +3,17 @@ package apiclient
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 
 	"github.com/driftmapper/protocol"
 )
+
+// testSHA is the commit_sha the tests submit; BuildRegistration.CommitSha is a
+// pointer since protocol v0.22.0 (the token supplies it when it can).
+var testSHA = "abc123"
 
 func TestRegisterBuild_Success(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -19,8 +24,8 @@ func TestRegisterBuild_Success(t *testing.T) {
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			t.Fatalf("decode request body: %v", err)
 		}
-		if body.CommitSha != "abc123" {
-			t.Errorf("request commit_sha = %q, want %q", body.CommitSha, "abc123")
+		if body.CommitSha == nil || *body.CommitSha != "abc123" {
+			t.Errorf("request commit_sha = %v, want %q", body.CommitSha, "abc123")
 		}
 
 		resolutionURL := "https://driftmapper.test/r/build1"
@@ -36,7 +41,7 @@ func TestRegisterBuild_Success(t *testing.T) {
 	defer srv.Close()
 
 	client := New(srv.URL, "tok")
-	build, created, err := client.RegisterBuild(context.Background(), protocol.BuildRegistration{CommitSha: "abc123"})
+	build, created, err := client.RegisterBuild(context.Background(), protocol.BuildRegistration{CommitSha: &testSHA})
 	if err != nil {
 		t.Fatalf("RegisterBuild: %v", err)
 	}
@@ -59,7 +64,7 @@ func TestRegisterBuild_IdempotentRetryReturns200NotCreated(t *testing.T) {
 	defer srv.Close()
 
 	client := New(srv.URL, "tok")
-	_, created, err := client.RegisterBuild(context.Background(), protocol.BuildRegistration{CommitSha: "abc123"})
+	_, created, err := client.RegisterBuild(context.Background(), protocol.BuildRegistration{CommitSha: &testSHA})
 	if err != nil {
 		t.Fatalf("RegisterBuild: %v", err)
 	}
@@ -86,7 +91,7 @@ func TestRegisterBuild_ClaimMismatchSurfacesStructuredDetails(t *testing.T) {
 	defer srv.Close()
 
 	client := New(srv.URL, "tok")
-	_, _, err := client.RegisterBuild(context.Background(), protocol.BuildRegistration{CommitSha: "abc123"})
+	_, _, err := client.RegisterBuild(context.Background(), protocol.BuildRegistration{CommitSha: &testSHA})
 	if err == nil {
 		t.Fatal("RegisterBuild: want error, got nil")
 	}
@@ -115,7 +120,7 @@ func TestRegisterBuild_UnknownFieldRejection(t *testing.T) {
 	defer srv.Close()
 
 	client := New(srv.URL, "tok")
-	_, _, err := client.RegisterBuild(context.Background(), protocol.BuildRegistration{CommitSha: "abc123"})
+	_, _, err := client.RegisterBuild(context.Background(), protocol.BuildRegistration{CommitSha: &testSHA})
 	apiErr, ok := err.(*Error)
 	if !ok {
 		t.Fatalf("err is %T, want *apiclient.Error", err)
@@ -200,5 +205,49 @@ func TestAuthorizeRepository_ErrorCodes(t *testing.T) {
 				t.Errorf("StatusCode = %d, want %d", apiErr.StatusCode, tc.status)
 			}
 		})
+	}
+}
+
+func TestRecordDeployment_CreatedAndAlreadyRecorded(t *testing.T) {
+	for _, tc := range []struct {
+		status  int
+		created bool
+	}{{http.StatusCreated, true}, {http.StatusOK, false}} {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path != "/v1/deployments" {
+				t.Errorf("path = %q, want /v1/deployments", r.URL.Path)
+			}
+			if got := r.Header.Get("Authorization"); got != "Bearer tok" {
+				t.Errorf("Authorization = %q", got)
+			}
+			var body map[string]any
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Fatal(err)
+			}
+			if body["environment"] != "production" || len(body) != 1 {
+				t.Errorf("body = %v, want only environment", body)
+			}
+			w.WriteHeader(tc.status)
+			json.NewEncoder(w).Encode(map[string]any{"data": protocol.Deployment{Environment: "production", BuildInstanceId: "b1"}})
+		}))
+		env := "production"
+		dep, created, err := New(srv.URL, "tok").RecordDeployment(context.Background(), protocol.DeploymentRequest{Environment: &env})
+		srv.Close()
+		if err != nil || created != tc.created || dep.BuildInstanceId != "b1" {
+			t.Errorf("status %d: dep=%+v created=%v err=%v", tc.status, dep, created, err)
+		}
+	}
+}
+
+func TestRecordDeployment_ReturnsStructuredError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnprocessableEntity)
+		json.NewEncoder(w).Encode(map[string]any{"error": map[string]any{"code": "build_not_registered", "message": "none"}})
+	}))
+	defer srv.Close()
+	_, _, err := New(srv.URL, "tok").RecordDeployment(context.Background(), protocol.DeploymentRequest{})
+	var apiErr *Error
+	if !errors.As(err, &apiErr) || apiErr.Code != "build_not_registered" || apiErr.StatusCode != http.StatusUnprocessableEntity {
+		t.Fatalf("err = %v, want *Error build_not_registered 422", err)
 	}
 }

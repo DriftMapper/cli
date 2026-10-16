@@ -330,9 +330,24 @@ ever needs to execute to fetch a binary — the platform binary arrives as an or
 DRFT-124 cut deploy-marking and verification (formerly `deploy`/`verify`, DRFT-88/96/97/98)
 as scope creep: DriftMapper's one opinionated thing is `build-info.html` — what it is, how
 it's structured, how it points back to the backend. Where it's hosted, how it's kept fresh,
-and what's done with it are the customer's problem. Don't reintroduce a "what's currently
-true about a deployment" ledger, environment-keyed state, or a second API read to support one
-without a fresh product decision — this repo went down that path once already and backed out
-of it. A read-only `probe <url>` command (fetch + parse a deployed build-info file, print it)
-remains a plausible, much smaller future addition — see DRFT-131 — but it records nothing
-server-side.
+and what's done with it are the customer's problem.
+
+DRFT-183 later made a fresh, narrower decision: environment history. `driftmapper record`
+(DRFT-185) is its write side — from CI, it records that a registered build is now in an
+environment. It is a **claim by the pipeline**, not verification of what is running: the
+server sets the time, appends a record, and labels it "reported by the deploying pipeline".
+It is not the old `deploy` and must not grow back into it: no verification, no assertion
+ledger, no repo-pair bindings, no dashboard tagging. A deploy from a laptop is not a thing
+(a record must mean "an OIDC token proved who reported it", the same rule as registration).
+Reading what a deployed instance serves is the probe (DRFT-184, not built; DRFT-131 held a
+smaller `probe <url>` that was canceled), and it is a separate command, not a flag on `record`.
+
+## Gotcha — `record` takes the commit from the token only when the deploy shares the build's commit
+
+A deploy job's own token commit is not always the commit it deploys: a promotion, a
+`workflow_dispatch` or a `workflow_run` runs against a different `sha`. Without `--commit`
+or `--build-id`, `record` names the module's build at the token's commit, which is right only
+for a deploy in the same workflow as the build. How the commit or build id reaches a different
+workflow is the pipeline's plumbing (a job output, a workflow input, an artifact): registration
+prints the id and writes it into `build-info.html`. The environment may be omitted when the job
+targets a CI environment, because the server takes it from the token (a submitted one must match).

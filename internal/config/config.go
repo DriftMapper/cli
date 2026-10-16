@@ -72,6 +72,44 @@ func Challenge() string {
 	return os.Getenv("DRIFTMAPPER_CHALLENGE")
 }
 
+// App is the app name to register builds under (DRFT-188), from
+// DRIFTMAPPER_APP. Empty means "let the server default it to the repository name".
+func App() string {
+	return os.Getenv("DRIFTMAPPER_APP")
+}
+
+// Module is the module name within the app, from DRIFTMAPPER_MODULE. Empty means
+// "let the server default it to the app name".
+func Module() string {
+	return os.Getenv("DRIFTMAPPER_MODULE")
+}
+
+// Environment is the environment `driftmapper record` records a deployment into
+// (DRFT-185), from DRIFTMAPPER_ENVIRONMENT. Empty is valid: a job that targets a CI
+// environment carries it in its token, and the server uses that.
+func Environment() string {
+	return os.Getenv("DRIFTMAPPER_ENVIRONMENT")
+}
+
+// Commit is the commit of the build being recorded as deployed, from
+// DRIFTMAPPER_COMMIT. Empty means the server uses the token's own commit.
+func Commit() string {
+	return os.Getenv("DRIFTMAPPER_COMMIT")
+}
+
+// BuildID is the exact build being recorded as deployed, from
+// DRIFTMAPPER_BUILD_ID: the build_instance_id the registration printed and wrote to
+// build-info.html. Exclusive with Commit.
+func BuildID() string {
+	return os.Getenv("DRIFTMAPPER_BUILD_ID")
+}
+
+// DeploymentURL is where the deployment serves its build-info, from
+// DRIFTMAPPER_DEPLOYMENT_URL. Empty means none is recorded.
+func DeploymentURL() string {
+	return os.Getenv("DRIFTMAPPER_DEPLOYMENT_URL")
+}
+
 func orDefault(env, def string) string {
 	if v := os.Getenv(env); v != "" {
 		return v

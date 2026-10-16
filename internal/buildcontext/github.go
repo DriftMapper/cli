@@ -38,7 +38,7 @@ func FromGit() (protocol.BuildRegistration, error) {
 		return protocol.BuildRegistration{}, err
 	}
 	reg := protocol.BuildRegistration{
-		CommitSha: ctx.CommitSHA,
+		CommitSha: &ctx.CommitSHA,
 		BuiltAt:   ctx.BuiltAt,
 	}
 	if ctx.Repository != "" {
@@ -77,7 +77,7 @@ func FromGitHubActions() (protocol.BuildRegistration, error) {
 	if err != nil {
 		reg = protocol.BuildRegistration{}
 	}
-	reg.CommitSha = sha
+	reg.CommitSha = &sha
 	reg.BuiltAt = time.Now().UTC()
 	trigger := normalizeTrigger(os.Getenv("GITHUB_EVENT_NAME"))
 	reg.TriggerEvent = &trigger

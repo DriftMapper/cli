@@ -223,3 +223,35 @@ func TestRegisterBuildError_OtherCodesWrapGenerically(t *testing.T) {
 		t.Errorf("err = %q, want no challenge guidance for a non-no_live_policy error", err.Error())
 	}
 }
+
+func TestSetNames(t *testing.T) {
+	cases := []struct {
+		name                string
+		envApp, envModule   string
+		app, module         string
+		wantApp, wantModule string
+	}{
+		{name: "neither: server defaults"},
+		{name: "flags", app: "shop", module: "web", wantApp: "shop", wantModule: "web"},
+		{name: "env", envApp: "shop", envModule: "api", wantApp: "shop", wantModule: "api"},
+		{name: "flag beats env", envApp: "env", envModule: "env", app: "flag", module: "flag", wantApp: "flag", wantModule: "flag"},
+		{name: "module only", module: "web", wantModule: "web"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			t.Setenv("DRIFTMAPPER_APP", c.envApp)
+			t.Setenv("DRIFTMAPPER_MODULE", c.envModule)
+			var reg protocol.BuildRegistration
+			setNames(&reg, c.app, c.module)
+			got := func(p *string) string {
+				if p == nil {
+					return ""
+				}
+				return *p
+			}
+			if got(reg.App) != c.wantApp || got(reg.Module) != c.wantModule {
+				t.Errorf("app/module = %q/%q, want %q/%q", got(reg.App), got(reg.Module), c.wantApp, c.wantModule)
+			}
+		})
+	}
+}
