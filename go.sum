@@ -2,3 +2,5 @@ github.com/driftmapper/protocol v0.25.0 h1:MPAoQoLzozBzrShJpUdu3L63rQMA4vyOZH4HA
 github.com/driftmapper/protocol v0.25.0/go.mod h1:GnExj2ZevcTrru7gjm40j8yZtnaAgKWsPelBvp/d260=
 github.com/driftmapper/protocol v0.26.0 h1:pxbQEOGjezMdwSBJ48yBLMvCQoDzuDS96Z8wbo9eq90=
 github.com/driftmapper/protocol v0.26.0/go.mod h1:GnExj2ZevcTrru7gjm40j8yZtnaAgKWsPelBvp/d260=
+github.com/driftmapper/protocol v0.29.0 h1:MIT3pTuoCFGcCXRSOPXEoH9j6WysVool8KSAo7NVmvs=
+github.com/driftmapper/protocol v0.29.0/go.mod h1:GnExj2ZevcTrru7gjm40j8yZtnaAgKWsPelBvp/d260=
